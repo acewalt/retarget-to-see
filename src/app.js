@@ -94,6 +94,7 @@ const state = {
   restPoseManifest:[],
   customRestPoses:[],
   restPosePreset:null,
+  restPoseBuiltin:false,
   currentTime:0,
   playing:false,
   lastTick:performance.now(),
@@ -808,6 +809,37 @@ function faceSettings(){
   };
 }
 
+function isLikelyMixamoSource(){
+  if (state.preset?.name?.toLowerCase().startsWith("mixamo")) return true;
+  if ((els.sourcePrefix.value || "").toLowerCase().includes("mixamorig")) return true;
+  return Boolean(state.sourceRig?.boneNames?.some(name =>
+    String(name).toLowerCase().includes("mixamorig")
+  ));
+}
+
+function builtInRestPoseCompatible(){
+  // BlendCap's bundled T/A pose files encode pose deltas captured from the
+  // BlendCap source armature. A Mixamo FBX already carries its own bind/rest
+  // pose; applying those bundled source overrides to Mixamo can rotate the
+  // whole source incorrectly. User-saved/imported web rest poses remain valid.
+  if (!state.restPoseBuiltin) return true;
+  if (!state.restPosePreset) return true;
+  if (!isLikelyMixamoSource()) return true;
+  const n = String(state.restPosePreset.name || "").toUpperCase();
+  return !(n === "T-POSE" || n === "A-POSE");
+}
+
+function mappingCoverage(){
+  const {sourcePrefix,targetPrefix} = currentPrefixes();
+  return countValidPairs(
+    state.pairs,
+    state.sourceRig,
+    state.targetRig,
+    sourcePrefix,
+    targetPrefix
+  );
+}
+
 function applyPresetData(data,sourceLabel="Preset"){
   state.preset = data;
   state.pairs = (data.pairs || []).map(normalizePair);
@@ -833,7 +865,17 @@ function applyPresetData(data,sourceLabel="Preset"){
   renderIkRows();
   renderFaceRegions();
   updateValidCount();
-  setStatus(`${sourceLabel}: ${data.name || "mapa cargado"}.`,"success");
+
+  if (els.useCustomRest.checked && !builtInRestPoseCompatible()){
+    els.useCustomRest.checked = false;
+    updateRestPoseControls();
+  }
+
+  const coverage = mappingCoverage();
+  const coverageText = state.sourceRig && state.targetRig && coverage.total
+    ? ` · ${coverage.valid}/${coverage.total} pares resueltos`
+    : "";
+  setStatus(`${sourceLabel}: ${data.name || "mapa cargado"}${coverageText}.`,"success");
 }
 
 async function loadPresetManifest(){
@@ -922,6 +964,7 @@ function renderRestPoseSelect(){
 async function loadSelectedRestPose(){
   const value = els.restPoseSelect.value;
   state.restPosePreset = null;
+  state.restPoseBuiltin = false;
   if (!value){
     updateButtons();
     return null;
@@ -929,6 +972,7 @@ async function loadSelectedRestPose(){
 
   let data = null;
   if (value.startsWith("builtin:")){
+    state.restPoseBuiltin = true;
     const file = value.slice("builtin:".length);
     const res = await fetch(`./rest_pose_presets/${file}`,{cache:"no-store"});
     if (!res.ok) throw new Error(`No pude cargar rest pose ${file}: HTTP ${res.status}`);
@@ -940,11 +984,21 @@ async function loadSelectedRestPose(){
 
   if (!data) return null;
   state.restPosePreset = data;
+
   // BlendCap v5 stores this flag with each preset. Old presets without
   // the field historically behaved as full loc/scale.
   els.includeRestLocScale.checked = data.include_loc_scale === undefined
     ? true
     : Boolean(data.include_loc_scale);
+
+  if (!builtInRestPoseCompatible()){
+    els.useCustomRest.checked = false;
+    setStatus(
+      `${data.name} pertenece al Source de BlendCap y no se aplicará sobre este Source Mixamo. Se usará el bind/rest pose original del FBX.`,
+      "error"
+    );
+  }
+
   updateRestPoseControls();
   updateButtons();
   return data;
@@ -997,6 +1051,7 @@ function saveCurrentRestPose(){
     renderRestPoseSelect();
     els.restPoseSelect.value = `custom:${state.customRestPoses.length-1}`;
     state.restPosePreset = data;
+    state.restPoseBuiltin = false;
     els.useCustomRest.checked = true;
     els.useCurrentRest.checked = false;
     updateRestPoseControls();
@@ -1109,7 +1164,8 @@ function setBusy(busy){
 function updateButtons(){
   const {sourcePrefix,targetPrefix} = currentPrefixes();
   const valid = countValidPairs(state.pairs,state.sourceRig,state.targetRig,sourcePrefix,targetPrefix).valid;
-  const customRestReady = !els.useCustomRest.checked || Boolean(state.restPosePreset);
+  const customRestReady = !els.useCustomRest.checked
+    || (Boolean(state.restPosePreset) && builtInRestPoseCompatible());
   els.applyBtn.disabled = state.busy || !state.sourceRig || !state.targetRig || !state.sourceClip || valid === 0 || !customRestReady;
   els.convertIkBtn.disabled = state.busy || !state.targetRig || !state.retargetClip || !state.ikChains.length;
   els.exportGlbBtn.disabled = state.busy || !state.targetRig || !state.retargetClip;
@@ -1126,7 +1182,21 @@ async function applyRetarget(){
 
   try{
     const {sourcePrefix,targetPrefix} = currentPrefixes();
+    const coverage = mappingCoverage();
+
+    // Do not silently produce an apparently "dead" retarget from a preset
+    // that only resolves a handful of bones.
+    if (coverage.total >= 10 && coverage.valid / coverage.total < 0.45){
+      throw new Error(
+        `El preset solo resuelve ${coverage.valid}/${coverage.total} pares. No voy a hornear una animación incompleta. Revisa el preset/prefijos o usa Auto-Match.`
+      );
+    }
+
     const restTime = state.currentTime;
+    const useSavedRest = els.useCustomRest.checked
+      && state.restPosePreset
+      && builtInRestPoseCompatible();
+
     const result = await bakeRetarget({
       sourceRig:state.sourceRig,
       targetRig:state.targetRig,
@@ -1136,7 +1206,7 @@ async function applyRetarget(){
       fps:Number(els.fpsInput.value) || 30,
       autoScale:els.autoScale.checked,
       useCurrentSourcePoseAsRest:els.useCurrentRest.checked,
-      restPosePreset:els.useCustomRest.checked ? state.restPosePreset : null,
+      restPosePreset:useSavedRest ? state.restPosePreset : null,
       includeRestLocationScale:els.includeRestLocScale.checked,
       sourceRestTime:restTime,
       useWorldLocation:els.useWorldLocation.checked,
@@ -1362,6 +1432,7 @@ els.restPoseFile.addEventListener("change",async () => {
     renderRestPoseSelect();
     els.restPoseSelect.value = `custom:${state.customRestPoses.length-1}`;
     state.restPosePreset = data;
+    state.restPoseBuiltin = false;
     els.useCustomRest.checked = true;
     els.useCurrentRest.checked = false;
     els.includeRestLocScale.checked = data.include_loc_scale === undefined
