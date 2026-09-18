@@ -1,0 +1,56 @@
+{
+  "attribution": "Presets ported from Arcomade/BlendCap under GPL-3.0",
+  "source": "https://github.com/Arcomade/BlendCap",
+  "presets": [
+    {
+      "file": "blendcap_to_rigify_new.json",
+      "name": "BlendCap → Rigify (New)",
+      "target_kind": "rigify_control"
+    },
+    {
+      "file": "blendcap_to_rigify_old.json",
+      "name": "BlendCap → Rigify (Old)",
+      "target_kind": "rigify_control"
+    },
+    {
+      "file": "blendcap_to_arp.json",
+      "name": "BlendCap → Auto-Rig Pro",
+      "target_kind": "generic"
+    },
+    {
+      "file": "blendcap_to_mixamo.json",
+      "name": "BlendCap → Mixamo",
+      "target_kind": "generic"
+    },
+    {
+      "file": "blendcap_to_cloudrig.json",
+      "name": "BlendCap → CloudRig",
+      "target_kind": "generic"
+    },
+    {
+      "file": "blendcap_to_mixamo_ctrl.json",
+      "name": "BlendCap → Mixamo Control Rig",
+      "target_kind": "generic"
+    },
+    {
+      "file": "mixamo_to_mixamo_ctrl.json",
+      "name": "Mixamo → Mixamo Control Rig",
+      "target_kind": "generic"
+    },
+    {
+      "file": "mixamo_to_arp.json",
+      "name": "Mixamo → Auto-Rig Pro",
+      "target_kind": "generic"
+    },
+    {
+      "file": "mixamo_to_rigify.json",
+      "name": "Mixamo → Rigify",
+      "target_kind": "rigify_control"
+    },
+    {
+      "file": "mixamo_to_cloudrig.json",
+      "name": "Mixamo → CloudRig",
+      "target_kind": "generic"
+    }
+  ]
+}
