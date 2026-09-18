@@ -1678,14 +1678,17 @@ async function applyRetarget(){
       ? ` (${result.locationScaleMethod}${result.locationScaleSamples ? `, n=${result.locationScaleSamples}` : ""})`
       : "";
     const rootMotionText = result.rootMotionChannels
-      ? ` Root motion: ${result.rootMotionChannels} canal(es) sobre el objeto completo.`
+      ? ` Root motion: ${result.rootMotionChannels} canal(es) sobre el objeto completo${result.rootMotionSources?.length ? ` desde ${result.rootMotionSources.join(", ")}` : ""}.`
+      : "";
+    const splitRootText = result.splitRootMappings?.length
+      ? ` Set-as-Root separado: ${result.splitRootMappings.join("; ")} (ROT al deform, LOC al objeto).`
       : "";
     const collapsedText = result.collapsedRotationTargets?.length
       ? ` Controles colapsados en FBX: ${result.collapsedRotationTargets
           .map(x => `${x.sources.join("+")}→${x.target}`)
           .join("; ")}.`
       : "";
-    let message = `Retarget FK terminado: ${result.validPairs}/${result.totalPairs} pares, cuerpo ${coverage.coreValid}/${coverage.coreTotal}, dedos ${coverage.fingerValid}/${coverage.fingerTotal}, ${result.frameCount} frames, scale ${result.locationScale.toFixed(4)}${scaleMethod}.${rootMotionText}${collapsedText}${redirectedText}${unresolvedText}`;
+    let message = `Retarget FK terminado: ${result.validPairs}/${result.totalPairs} pares, cuerpo ${coverage.coreValid}/${coverage.coreTotal}, dedos ${coverage.fingerValid}/${coverage.fingerTotal}, ${result.frameCount} frames, scale ${result.locationScale.toFixed(4)}${scaleMethod}.${rootMotionText}${splitRootText}${collapsedText}${redirectedText}${unresolvedText}`;
 
     if (els.autoBakeIk.checked && state.ikChains.length){
       try{
