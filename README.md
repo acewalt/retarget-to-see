@@ -14,6 +14,7 @@ Retargeting de animación 100% en el navegador para FBX.
 - Soporta pares **HEAD_LOCAL** para cara.
 - Auto-scale por altura de esqueleto.
 - Permite usar la pose actual del Source como rest pose.
+- Incluye **Custom Rest Pose** con los presets T-POSE/A-POSE de BlendCap, preview, importación y guardado de poses propias, además de Location & Scale opcional.
 - Puede hornear controles IK si el Target FBX realmente contiene esos controles.
 - Preview sincronizado Source/Target.
 - Exporta el Target retargeteado como **GLB** con la animación horneada.
@@ -37,4 +38,4 @@ Este proyecto es GPL-3.0. El algoritmo de retargeting, el esquema de presets y l
 
 https://github.com/Arcomade/BlendCap
 
-La implementación web no ejecuta `bpy` ni Blender en WebAssembly; reimplementa el retargeting sobre Three.js y matrices/quaternions del esqueleto FBX.
+La implementación web no ejecuta `bpy` ni Blender en WebAssembly; reimplementa el retargeting sobre Three.js y matrices/quaternions del esqueleto FBX. WASM no es necesario para el núcleo matemático actual; puede añadirse más adelante como optimización para clips muy densos.
