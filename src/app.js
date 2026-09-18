@@ -571,13 +571,24 @@ function maybeAutodetectPrefixes(){
   }
 }
 
-function normalizePair(raw={}){
+function remapBlenderAxesToThree(mask="XYZ"){
+  const src = String(mask || "XYZ").toUpperCase();
+  const out = new Set();
+  if (src.includes("X")) out.add("X");
+  if (src.includes("Y")) out.add("Z"); // Blender forward -> Three depth
+  if (src.includes("Z")) out.add("Y"); // Blender up -> Three up
+  return ["X","Y","Z"].filter(a => out.has(a)).join("") || "XYZ";
+}
+
+function normalizePair(raw={},axisConvention="THREE_Y_UP"){
   const channels = String(raw.channels || "ROT").toUpperCase();
   return {
     source:String(raw.source || ""),
     target:String(raw.target || ""),
     channels:["ROT","LOC","LOC_ROT"].includes(channels) ? channels : "ROT",
-    axes:String(raw.axes || "XYZ").toUpperCase(),
+    axes:axisConvention === "BLENDER_Z_UP"
+      ? remapBlenderAxesToThree(raw.axes || "XYZ")
+      : String(raw.axes || "XYZ").toUpperCase(),
     loc_space:String(raw.loc_space || "BASIS").toUpperCase() === "HEAD_LOCAL" ? "HEAD_LOCAL" : "BASIS",
     influence:Number.isFinite(Number(raw.influence)) ? Number(raw.influence) : 1,
     loc_scale:Number.isFinite(Number(raw.loc_scale)) ? Number(raw.loc_scale) : 1,
@@ -929,7 +940,8 @@ function detailedMappingCoverage(){
 
 function applyPresetData(data,sourceLabel="Preset"){
   state.preset = data;
-  state.pairs = (data.pairs || []).map(normalizePair);
+  const axisConvention = data.axis_convention || "BLENDER_Z_UP";
+  state.pairs = (data.pairs || []).map(p => normalizePair(p,axisConvention));
   state.ikChains = (data.ik_chains || []).map(normalizeIkChain);
 
   els.sourcePrefix.value = data.source_prefix || "";
@@ -1197,6 +1209,7 @@ function mapConfig(name=""){
   const {sourcePrefix,targetPrefix} = currentPrefixes();
   return {
     name:name || state.preset?.name || "Custom Web Retarget Map",
+    axis_convention:"THREE_Y_UP",
     target_kind:state.preset?.target_kind || "generic",
     sourcePrefix,targetPrefix,
     autoBakeIk:els.autoBakeIk.checked,
@@ -1339,7 +1352,13 @@ async function applyRetarget(){
     const unresolvedText = coverage.unresolvedCore?.length
       ? ` Sin resolver: ${coverage.unresolvedCore.slice(0,6).join(", ")}${coverage.unresolvedCore.length > 6 ? "…" : ""}`
       : "";
-    let message = `Retarget FK terminado: ${result.validPairs}/${result.totalPairs} pares, cuerpo ${coverage.coreValid}/${coverage.coreTotal}, dedos ${coverage.fingerValid}/${coverage.fingerTotal}, ${result.frameCount} frames, scale ${result.locationScale.toFixed(4)}.${redirectedText}${unresolvedText}`;
+    const scaleMethod = result.locationScaleMethod
+      ? ` (${result.locationScaleMethod}${result.locationScaleSamples ? `, n=${result.locationScaleSamples}` : ""})`
+      : "";
+    const rootMotionText = result.rootMotionChannels
+      ? ` Root motion: ${result.rootMotionChannels} canal(es) sobre el objeto completo.`
+      : "";
+    let message = `Retarget FK terminado: ${result.validPairs}/${result.totalPairs} pares, cuerpo ${coverage.coreValid}/${coverage.coreTotal}, dedos ${coverage.fingerValid}/${coverage.fingerTotal}, ${result.frameCount} frames, scale ${result.locationScale.toFixed(4)}${scaleMethod}.${rootMotionText}${redirectedText}${unresolvedText}`;
 
     if (els.autoBakeIk.checked && state.ikChains.length){
       try{
