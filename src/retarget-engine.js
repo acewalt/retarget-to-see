@@ -225,6 +225,7 @@ export function createRigState(root, fileName=""){
 
   const rig = {
     root,
+    rootRest:cloneTransform(root),
     fileName,
     bones,
     boneMap,
@@ -246,6 +247,12 @@ export function resetRigToRest(rig){
   if (rig.mixer){
     rig.mixer.stopAllAction();
     rig.mixer.setTime(0);
+  }
+  if (rig.rootRest){
+    rig.root.position.copy(rig.rootRest.position);
+    rig.root.quaternion.copy(rig.rootRest.quaternion);
+    rig.root.scale.copy(rig.rootRest.scale);
+    rig.root.updateMatrix();
   }
   for (const bone of rig.bones){
     const r = rig.rest.get(bone.name);
@@ -708,16 +715,94 @@ export function autoMatchPairs(sourceRig, targetRig, sourcePrefix="", targetPref
   return pairs;
 }
 
-function rigExtent(restMap){
-  if (!restMap || !restMap.size) return 1;
-  const min = new THREE.Vector3(Infinity,Infinity,Infinity);
-  const max = new THREE.Vector3(-Infinity,-Infinity,-Infinity);
-  for (const r of restMap.values()){
-    min.min(r.worldPosition);
-    max.max(r.worldPosition);
+function bodyBoneNames(rig){
+  if (rig?.weightedBoneNames?.size) return rig.weightedBoneNames;
+  if (rig?.skinBoneNames?.size) return rig.skinBoneNames;
+  return new Set(rig?.boneNames || []);
+}
+
+function bodyHeight(rig,restMap){
+  if (!rig || !restMap?.size) return 1;
+  const names = bodyBoneNames(rig);
+  const ys = [];
+  for (const name of names){
+    const r = restMap.get(name);
+    if (!r) continue;
+    const y = r.worldPosition.y;
+    if (Number.isFinite(y)) ys.push(y);
   }
-  const size = max.sub(min);
-  return Math.max(size.x,size.y,size.z,EPS);
+  if (ys.length < 2) return 1;
+  ys.sort((a,b)=>a-b);
+
+  // Ignore extreme accessory/control outliers even if they happen to carry
+  // tiny skin weights. 5–95% is stable for humanoid body scale.
+  const lo = ys[Math.floor((ys.length-1)*0.05)];
+  const hi = ys[Math.ceil((ys.length-1)*0.95)];
+  return Math.max(Math.abs(hi-lo),EPS);
+}
+
+function median(values){
+  const a = values.filter(Number.isFinite).sort((x,y)=>x-y);
+  if (!a.length) return null;
+  const m = Math.floor(a.length/2);
+  return a.length % 2 ? a[m] : (a[m-1]+a[m])*0.5;
+}
+
+function robustRetargetScale(records,sourceRig,targetRig,sourceRest){
+  // Prefer scale inferred from corresponding mapped body landmarks. This
+  // avoids CloudRig pole/control bones making the target hundreds of times
+  // "larger" than the visible character.
+  const bodyRecords = records.filter(r => r.sourceBone && r.targetBone && !r.targetRoot);
+  const hipsRecord = bodyRecords.find(r => {
+    const s = normalizeBoneName(r.source);
+    return (s === "hips" || s === "pelvis") && pairHasRotation(r);
+  }) || bodyRecords.find(r => {
+    const s = normalizeBoneName(r.source);
+    return s === "hips" || s === "pelvis";
+  });
+
+  const ratios = [];
+  if (hipsRecord){
+    const srcAnchor = sourceRest.get(hipsRecord.sourceBone.name)?.worldPosition;
+    const tgtAnchor = targetRig.rest.get(hipsRecord.targetBone.name)?.worldPosition;
+    if (srcAnchor && tgtAnchor){
+      const usedTargets = new Set();
+      for (const r of bodyRecords){
+        if (usedTargets.has(r.targetBone.name)) continue;
+        usedTargets.add(r.targetBone.name);
+
+        const sr = sourceRest.get(r.sourceBone.name);
+        const tr = targetRig.rest.get(r.targetBone.name);
+        if (!sr || !tr) continue;
+
+        const ds = sr.worldPosition.distanceTo(srcAnchor);
+        const dt = tr.worldPosition.distanceTo(tgtAnchor);
+        if (ds < EPS || dt < EPS) continue;
+
+        const ratio = dt/ds;
+        if (Number.isFinite(ratio) && ratio > 1e-4 && ratio < 1e4){
+          ratios.push(ratio);
+        }
+      }
+    }
+  }
+
+  if (ratios.length >= 4){
+    // Median rejects a wrongly-resolved limb or an accessory bone.
+    const value = median(ratios);
+    if (value && Number.isFinite(value)){
+      return {value,method:"mapped-landmarks",samples:ratios.length};
+    }
+  }
+
+  const sourceHeight = bodyHeight(sourceRig,sourceRest);
+  const targetHeight = bodyHeight(targetRig,targetRig.rest);
+  const value = targetHeight/sourceHeight;
+  return {
+    value:Number.isFinite(value) && value > EPS ? value : 1,
+    method:"weighted-height",
+    samples:0
+  };
 }
 
 function quatScaledDelta(poseQ, restQ, factor){
@@ -1108,16 +1193,47 @@ function computeFaceScale(sourceRig,targetRig,pairs,sourcePrefix,targetPrefix,so
   return Number.isFinite(ratio) && ratio > 0.05 && ratio < 20 ? ratio : null;
 }
 
+function isGlobalRootLocationPair(pair){
+  if (!pairHasLocation(pair)) return false;
+  const source = normalizeBoneName(pair.source);
+  if (source !== "hips" && source !== "pelvis") return false;
+
+  const target = String(pair.target || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g,"");
+
+  // BlendCap/CloudRig splits Mixamo Hips translation between TORSO-Spine Z
+  // and root XY. In an FBX those controls have no Blender constraints.
+  // Applying their translation to a weighted spine bone stretches the mesh,
+  // so these channels must move the whole imported Target object instead.
+  return target === "root" || target === "torsospine";
+}
+
 function actualPairRecords(pairs,sourceRig,targetRig,sourcePrefix,targetPrefix){
   const out = [];
   for (const raw of pairs || []){
     const sourceBone = resolveBone(sourceRig,raw.source,sourcePrefix);
+    if (!sourceBone) continue;
+
+    if (isGlobalRootLocationPair(raw)){
+      out.push({
+        ...raw,
+        sourceBone,
+        targetBone:null,
+        targetRoot:true,
+        sourceRest:sourceRig.rest.get(sourceBone.name),
+        targetRest:null
+      });
+      continue;
+    }
+
     const targetBone = resolveRetargetTargetBone(targetRig,raw.target,targetPrefix);
-    if (!sourceBone || !targetBone) continue;
+    if (!targetBone) continue;
     out.push({
       ...raw,
       sourceBone,
       targetBone,
+      targetRoot:false,
       sourceRest:sourceRig.rest.get(sourceBone.name),
       targetRest:targetRig.rest.get(targetBone.name)
     });
@@ -1179,7 +1295,10 @@ export async function bakeRetarget(options){
   // Return source to frame zero for the actual bake.
   setRigTime(sourceRig,0);
 
-  const locationScale = autoScale ? rigExtent(targetRig.rest) / rigExtent(sourceRest) : 1;
+  const scaleInfo = autoScale
+    ? robustRetargetScale(records,sourceRig,targetRig,sourceRest)
+    : {value:1,method:"disabled",samples:0};
+  const locationScale = scaleInfo.value;
   const step = 1 / Math.max(1,Number(fps) || 30);
   const duration = Math.max(0,sourceClip.duration || 0);
   const frameCount = Math.max(2,Math.floor(duration / step + 0.5) + 1);
@@ -1187,15 +1306,18 @@ export async function bakeRetarget(options){
   for (let i=0;i<frameCount;i++) times[i] = Math.min(duration,i*step);
   times[frameCount-1] = duration;
 
+  const rootLocationRecords = records.filter(r => r.targetRoot);
+  const boneRecords = records.filter(r => !r.targetRoot && r.targetBone);
+
   const targetByActual = new Map();
-  for (const r of records){
+  for (const r of boneRecords){
     if (!targetByActual.has(r.targetBone.name)) targetByActual.set(r.targetBone.name,[]);
     targetByActual.get(r.targetBone.name).push(r);
   }
 
   const rotationTargets = new Set();
   const locationTargets = new Set();
-  for (const r of records){
+  for (const r of boneRecords){
     if (pairHasRotation(r)) rotationTargets.add(r.targetBone.name);
     if (pairHasLocation(r)) locationTargets.add(r.targetBone.name);
   }
@@ -1206,6 +1328,7 @@ export async function bakeRetarget(options){
 
   const qValues = new Map();
   const pValues = new Map();
+  const rootPValues = rootLocationRecords.length ? [] : null;
   const previousQ = new Map();
   for (const n of rotationTargets) qValues.set(n,[]);
   for (const n of locationTargets) pValues.set(n,[]);
@@ -1245,6 +1368,27 @@ export async function bakeRetarget(options){
 
     localState.clear();
     worldOut.clear();
+
+    // Global locomotion must move the whole Target object, not a deform
+    // spine bone. Otherwise vertices partially weighted to unmapped
+    // hair/clothing bones are pulled into huge spikes.
+    let rootLocalPos = targetRig.rootRest?.position.clone()
+      || targetRig.root.position.clone();
+    for (const r of rootLocationRecords){
+      const srcRest = sourceRest.get(r.sourceBone.name);
+      if (!srcRest) continue;
+
+      const currentWorldPos = new THREE.Vector3()
+        .setFromMatrixPosition(r.sourceBone.matrixWorld);
+      const deltaWorld = currentWorldPos.sub(srcRest.worldPosition);
+      const contribution = deltaWorld.multiplyScalar(
+        locationScale
+        * pairMotionScale(r,faceSettings)
+        * Number(r.influence ?? 1)
+      );
+      applyAxesAdd(rootLocalPos,contribution,axesFor(r));
+    }
+    if (rootPValues) pushVec(rootPValues,rootLocalPos);
 
     // PASS 1: rest locals + regular BASIS/WORLD location + world-delta rotation.
     for (const bone of sortedBones){
@@ -1369,6 +1513,12 @@ export async function bakeRetarget(options){
   for (const [name,values] of pValues){
     tracks.push(new THREE.VectorKeyframeTrack(makeTrackName(name,"position"),times,values));
   }
+  if (rootPValues){
+    const rootTrackName = targetRig.root.name
+      ? makeTrackName(targetRig.root.name,"position")
+      : ".position";
+    tracks.push(new THREE.VectorKeyframeTrack(rootTrackName,times,rootPValues));
+  }
 
   const clip = new THREE.AnimationClip("Retargeted",duration,tracks);
   clip.resetDuration();
@@ -1383,6 +1533,9 @@ export async function bakeRetarget(options){
     totalPairs:pairs.length,
     frameCount,
     locationScale,
+    locationScaleMethod:scaleInfo.method,
+    locationScaleSamples:scaleInfo.samples,
+    rootMotionChannels:rootLocationRecords.length,
     faceScale
   };
 }
