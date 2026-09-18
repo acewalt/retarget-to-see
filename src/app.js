@@ -749,7 +749,8 @@ function saveCurrentRestPose(){
   try{
     const data = captureRestPosePreset(state.sourceRig,{
       name,
-      includeLocScale:els.includeRestLocScale.checked
+      includeLocScale:els.includeRestLocScale.checked,
+      sourcePrefix:els.sourcePrefix.value || ""
     });
     if (!Object.keys(data.bones || {}).length){
       setStatus("La pose actual coincide con el rest pose importado; no hay cambios que guardar.","error");
