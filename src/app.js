@@ -490,7 +490,10 @@ async function loadFbx(file,kind){
     const ignored = ignoredTargetClips
       ? ` · ${ignoredTargetClips} clips ignorados`
       : "";
-    els.targetMeta.textContent = `${file.name} · ${rig.bones.length} huesos${ignored}`;
+    const weightedInfo = rig.weightedBoneNames?.size
+      ? ` · ${rig.weightedBoneNames.size} deform reales`
+      : "";
+    els.targetMeta.textContent = `${file.name} · ${rig.bones.length} huesos${weightedInfo}${ignored}`;
     els.exportGlbBtn.disabled = true;
     els.exportClipBtn.disabled = true;
     els.convertIkBtn.disabled = true;
@@ -630,7 +633,9 @@ function renderMappings(){
     const valid = Boolean(sourceResolved && targetResolved);
 
     const row = document.createElement("div");
-    row.className = "map-row" + (valid ? "" : " invalid");
+    const optionalFingerMissing = !valid && isFingerPair(pair);
+    row.className = "map-row"
+      + (valid ? "" : optionalFingerMissing ? " optional-missing" : " invalid");
 
     const sourceInput = makeBoneInput(pair.source,"sourceBoneList",(v,commit=true) => {
       pair.source = v;
@@ -649,6 +654,8 @@ function renderMappings(){
       targetInput.title = directTarget && targetResolved !== directTarget
         ? `Control FBX sin constraints → animando deform bone: ${targetResolved.name}`
         : `Target real: ${targetResolved.name}`;
+    } else if (isFingerPair(pair)){
+      targetInput.title = "Dedo opcional no encontrado en los deform bones del Target; no bloquea el retarget corporal.";
     }
     row.appendChild(targetInput);
 
