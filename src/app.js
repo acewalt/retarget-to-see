@@ -235,8 +235,8 @@ function safeBaseName(name="file"){
   return name.replace(/\.[^.]+$/,"").replace(/[^a-z0-9_\-]+/gi,"_") || "retargeted";
 }
 
-const VIEWPORT_MATERIAL_ORIGINAL = "__retargetToSeeOriginalMaterial";
-const VIEWPORT_MATERIAL_SOLID = "__retargetToSeeSolidMaterial";
+const originalMaterialByMesh = new WeakMap();
+const solidMaterialByMesh = new WeakMap();
 
 function makeSolidWhiteMaterial(){
   return new THREE.MeshStandardMaterial({
@@ -248,30 +248,33 @@ function makeSolidWhiteMaterial(){
 }
 
 function applySolidWhiteViewport(root){
-  // Viewport-only override. Keep the real FBX materials so export can
-  // restore them without reloading the file.
+  // Viewport-only override. WeakMaps keep Material objects out of userData,
+  // so GLTFExporter never tries to serialize Three.js material instances.
   root.traverse(obj => {
     if (!obj.isMesh) return;
 
-    if (!(VIEWPORT_MATERIAL_ORIGINAL in obj.userData)){
-      obj.userData[VIEWPORT_MATERIAL_ORIGINAL] = obj.material;
+    if (!originalMaterialByMesh.has(obj)){
+      originalMaterialByMesh.set(obj,obj.material);
     }
 
-    if (!(VIEWPORT_MATERIAL_SOLID in obj.userData)){
-      obj.userData[VIEWPORT_MATERIAL_SOLID] = Array.isArray(obj.material)
-        ? obj.material.map(() => makeSolidWhiteMaterial())
-        : makeSolidWhiteMaterial();
+    if (!solidMaterialByMesh.has(obj)){
+      solidMaterialByMesh.set(
+        obj,
+        Array.isArray(obj.material)
+          ? obj.material.map(() => makeSolidWhiteMaterial())
+          : makeSolidWhiteMaterial()
+      );
     }
 
-    obj.material = obj.userData[VIEWPORT_MATERIAL_SOLID];
+    obj.material = solidMaterialByMesh.get(obj);
   });
 }
 
 function restoreOriginalViewportMaterials(root){
   root.traverse(obj => {
     if (!obj.isMesh) return;
-    if (VIEWPORT_MATERIAL_ORIGINAL in obj.userData){
-      obj.material = obj.userData[VIEWPORT_MATERIAL_ORIGINAL];
+    if (originalMaterialByMesh.has(obj)){
+      obj.material = originalMaterialByMesh.get(obj);
     }
   });
 }
