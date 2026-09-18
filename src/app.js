@@ -585,11 +585,17 @@ function normalizePair(raw={}){
 function updateValidCount(){
   const {sourcePrefix,targetPrefix} = currentPrefixes();
   const result = countValidPairs(state.pairs,state.sourceRig,state.targetRig,sourcePrefix,targetPrefix);
-  const redirected = result.redirected
-    ? ` · ${result.redirected} → deform`
+  const detail = detailedMappingCoverage();
+  const redirected = detail.redirected
+    ? ` · ${detail.redirected} → deform`
     : "";
-  els.validCount.textContent = `${result.valid} / ${result.total} válidos${redirected}`;
-  els.validCount.classList.toggle("bad",result.total > 0 && result.valid < result.total);
+  const fingerText = detail.fingerTotal
+    ? ` · cuerpo ${detail.coreValid}/${detail.coreTotal} · dedos ${detail.fingerValid}/${detail.fingerTotal}`
+    : "";
+  els.validCount.textContent = `${detail.valid} / ${detail.total} válidos${fingerText}${redirected}`;
+  // Missing fingers are optional: only flag as bad when a non-finger/core
+  // pair is unresolved.
+  els.validCount.classList.toggle("bad",detail.coreTotal > 0 && detail.coreValid < detail.coreTotal);
   updateButtons();
 }
 
@@ -858,6 +864,52 @@ function mappingCoverage(){
   );
 }
 
+function isFingerPair(pair){
+  const text = `${pair?.source || ""} ${pair?.target || ""}`.toLowerCase();
+  return /(finger|thumb|index|middle|ring|pinky|little)/.test(text);
+}
+
+function detailedMappingCoverage(){
+  const {sourcePrefix,targetPrefix} = currentPrefixes();
+  let valid = 0;
+  let redirected = 0;
+  let coreTotal = 0;
+  let coreValid = 0;
+  let fingerTotal = 0;
+  let fingerValid = 0;
+
+  for (const pair of state.pairs){
+    const source = resolveBone(state.sourceRig,pair.source,sourcePrefix);
+    const directTarget = resolveBone(state.targetRig,pair.target,targetPrefix);
+    const target = resolveRetargetTargetBone(state.targetRig,pair.target,targetPrefix);
+    const ok = Boolean(source && target);
+    const finger = isFingerPair(pair);
+
+    if (finger){
+      fingerTotal++;
+      if (ok) fingerValid++;
+    } else {
+      coreTotal++;
+      if (ok) coreValid++;
+    }
+
+    if (ok){
+      valid++;
+      if (directTarget && target !== directTarget) redirected++;
+    }
+  }
+
+  return {
+    valid,
+    total:state.pairs.length,
+    redirected,
+    coreTotal,
+    coreValid,
+    fingerTotal,
+    fingerValid
+  };
+}
+
 function applyPresetData(data,sourceLabel="Preset"){
   state.preset = data;
   state.pairs = (data.pairs || []).map(normalizePair);
@@ -1030,12 +1082,20 @@ function updateRestPoseControls(){
   els.previewRestBtn.disabled = state.busy
     || !state.sourceRig
     || !els.useCustomRest.checked
-    || !state.restPosePreset;
+    || !state.restPosePreset
+    || !builtInRestPoseCompatible();
   els.saveRestBtn.disabled = state.busy || !state.sourceRig;
 }
 
 function previewSelectedRestPose(){
   if (!state.sourceRig || !state.restPosePreset) return;
+  if (!builtInRestPoseCompatible()){
+    setStatus(
+      `${state.restPosePreset.name || "Rest Pose"} no es compatible con este Source Mixamo. Usa el bind/rest pose original del FBX o guarda/importa una pose propia.`,
+      "error"
+    );
+    return;
+  }
   state.playing = false;
   els.playBtn.textContent = "▶";
   try{
@@ -1195,8 +1255,11 @@ function updateButtons(){
   const {sourcePrefix,targetPrefix} = currentPrefixes();
   const valid = countValidPairs(state.pairs,state.sourceRig,state.targetRig,sourcePrefix,targetPrefix).valid;
   const customRestReady = !els.useCustomRest.checked
-    || (Boolean(state.restPosePreset) && builtInRestPoseCompatible());
+    || Boolean(state.restPosePreset);
   els.applyBtn.disabled = state.busy || !state.sourceRig || !state.targetRig || !state.sourceClip || valid === 0 || !customRestReady;
+  els.applyBtn.title = valid === 0
+    ? "No hay pares válidos para retargetear."
+    : "Aplicar los pares válidos. Los dedos faltantes no bloquean el cuerpo.";
   const ikReady = resolvableIkChainCount();
   els.convertIkBtn.disabled = state.busy || !state.targetRig || !state.retargetClip || ikReady === 0;
   els.convertIkBtn.title = ikReady
@@ -1216,13 +1279,14 @@ async function applyRetarget(){
 
   try{
     const {sourcePrefix,targetPrefix} = currentPrefixes();
-    const coverage = mappingCoverage();
+    const coverage = detailedMappingCoverage();
 
-    // Do not silently produce an apparently "dead" retarget from a preset
-    // that only resolves a handful of bones.
-    if (coverage.total >= 10 && coverage.valid / coverage.total < 0.45){
+    // Finger mappings are optional. A CloudRig FBX can legitimately omit
+    // or rename all 30 finger controls while the complete body (23 pairs)
+    // is perfectly retargetable.
+    if (coverage.coreTotal >= 6 && coverage.coreValid / coverage.coreTotal < 0.60){
       throw new Error(
-        `El preset solo resuelve ${coverage.valid}/${coverage.total} pares. No voy a hornear una animación incompleta. Revisa el preset/prefijos o usa Auto-Match.`
+        `Faltan demasiados huesos del cuerpo: ${coverage.coreValid}/${coverage.coreTotal}. Los dedos no bloquean el retarget, pero el cuerpo sí debe estar suficientemente mapeado.`
       );
     }
 
