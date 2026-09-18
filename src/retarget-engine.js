@@ -1143,12 +1143,16 @@ function buildWorldFromLocal(parentWorld, pos, quat, scale){
 }
 
 function pairHasRotation(pair){
+  if (pair?._location_only) return false;
+  if (pair?._rotation_only) return true;
   if (pair?.set_as_root) return true;
   const c = String(pair.channels || "ROT").toUpperCase();
   return c === "ROT" || c === "LOC_ROT";
 }
 
 function pairHasLocation(pair){
+  if (pair?._rotation_only) return false;
+  if (pair?._location_only) return true;
   if (pair?.set_as_root) return true;
   const c = String(pair.channels || "ROT").toUpperCase();
   return c === "LOC" || c === "LOC_ROT";
@@ -1233,36 +1237,85 @@ function isGlobalRootLocationPair(pair){
   return target === "root" || target === "torsospine";
 }
 
+function rootMotionSourceForBone(sourceRig,bone){
+  // If Auto-Rig Pro marks a torso bone as Root, using that bone's world
+  // position also includes the rotational sweep inherited from the pelvis.
+  // For FBX root translation, prefer the nearest pelvis/root ancestor.
+  let current = bone;
+  while (current?.isBone){
+    const key = normalizeBoneName(current.name);
+    if (key === "hips" || key === "pelvis" || key === "root") return current;
+    current = current.parent?.isBone ? current.parent : null;
+  }
+  return bone;
+}
+
 function actualPairRecords(pairs,sourceRig,targetRig,sourcePrefix,targetPrefix){
   const out = [];
-  for (const raw of pairs || []){
+
+  for (let pairIndex=0; pairIndex<(pairs || []).length; pairIndex++){
+    const raw = pairs[pairIndex];
     const sourceBone = resolveBone(sourceRig,raw.source,sourcePrefix);
     if (!sourceBone) continue;
 
     if (isGlobalRootLocationPair(raw)){
       out.push({
         ...raw,
+        pairIndex,
         sourceBone,
         targetBone:null,
         targetRoot:true,
+        _location_only:true,
         sourceRest:sourceRig.rest.get(sourceBone.name),
         targetRest:null
       });
       continue;
     }
 
-    // Browser/FBX note: CloudRig/ARP controls such as TORSO-Spine are
-    // constraint-driven inside Blender. Those constraints are absent from
-    // FBX, so even a Set-as-Root row must bake onto the resolved deform
-    // proxy that actually moves the mesh.
     const targetBone = resolveRetargetTargetBone(
       targetRig,
       raw.target,
       targetPrefix
     );
     if (!targetBone) continue;
+
+    if (raw.set_as_root){
+      // Blender can propagate a Root control through constraints. FBX cannot.
+      // Split ARP's "Set as Root" semantics:
+      //   - rotation -> the resolved deform proxy
+      //   - translation -> the whole imported Target object
+      // This prevents partial-skeleton translation and the long vertex spikes.
+      out.push({
+        ...raw,
+        pairIndex,
+        channels:"ROT",
+        _rotation_only:true,
+        sourceBone,
+        targetBone,
+        targetRoot:false,
+        sourceRest:sourceRig.rest.get(sourceBone.name),
+        targetRest:targetRig.rest.get(targetBone.name)
+      });
+
+      const locSource = rootMotionSourceForBone(sourceRig,sourceBone);
+      out.push({
+        ...raw,
+        pairIndex,
+        set_as_root:false,
+        channels:"LOC",
+        _location_only:true,
+        sourceBone:locSource,
+        targetBone:null,
+        targetRoot:true,
+        sourceRest:sourceRig.rest.get(locSource.name),
+        targetRest:null
+      });
+      continue;
+    }
+
     out.push({
       ...raw,
+      pairIndex,
       sourceBone,
       targetBone,
       targetRoot:false,
@@ -1608,13 +1661,20 @@ export async function bakeRetarget(options){
 
   return {
     clip,
-    validPairs:records.length,
+    validPairs:new Set(records.map(r => r.pairIndex)).size,
     totalPairs:pairs.length,
     frameCount,
     locationScale,
     locationScaleMethod:scaleInfo.method,
     locationScaleSamples:scaleInfo.samples,
     rootMotionChannels:rootLocationRecords.length,
+    rootMotionSources:[...new Set(rootLocationRecords.map(r => r.sourceBone?.name).filter(Boolean))],
+    splitRootMappings:[...new Set(records
+      .filter(r => r._rotation_only || r._location_only)
+      .map(r => r.pairIndex))]
+      .map(i => pairs[i])
+      .filter(Boolean)
+      .map(p => `${p.source}→${p.target}`),
     collapsedRotationTargets:[...targetByActual.entries()]
       .filter(([,recs]) => recs.filter(pairHasRotation).length > 1)
       .map(([name,recs]) => ({
