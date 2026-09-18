@@ -1016,6 +1016,10 @@ function buildBoneMapDiagnostic(){
         targetResolved
         && state.targetRig?.weightedBoneNames?.has(targetResolved.name)
       ),
+      targetHierarchyDriver:Boolean(
+        targetResolved
+        && state.targetRig?.hierarchyDriverBoneNames?.has(targetResolved.name)
+      ),
       optionalFinger:isFingerPair(pair),
       channels:pair.channels,
       axes:pair.axes,
@@ -1042,6 +1046,8 @@ function buildBoneMapDiagnostic(){
       boneCount:state.targetRig?.bones?.length || 0,
       skinBoneCount:state.targetRig?.skinBoneNames?.size || 0,
       weightedBoneCount:state.targetRig?.weightedBoneNames?.size || 0,
+      hierarchyDriverBoneCount:state.targetRig?.hierarchyDriverBoneNames?.size || 0,
+      hierarchyDriverBones:[...(state.targetRig?.hierarchyDriverBoneNames || [])].sort(),
       weightedBones:[...(state.targetRig?.weightedBoneNames || [])].sort(),
       skinBones:[...(state.targetRig?.skinBoneNames || [])].sort(),
       bones:state.targetRig?.boneNames || []
