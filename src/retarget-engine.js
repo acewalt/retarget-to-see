@@ -202,6 +202,20 @@ export function createRigState(root, fileName=""){
     if (!boneMap.has(bone.name)) boneMap.set(bone.name, bone);
   }
 
+  // A zero-weight control bone can still deform the mesh structurally when
+  // weighted bones are parented underneath it. Earlier versions treated all
+  // zero-weight controls as useless and redirected them to DEF bones. That is
+  // wrong for master controls such as CloudRig's TORSO-Spine/root hierarchy.
+  const hierarchyDriverBoneNames = new Set(weightedBoneNames);
+  for (const weightedName of weightedBoneNames){
+    let bone = boneMap.get(weightedName);
+    let parent = bone?.parent;
+    while (parent?.isBone){
+      if (parent.name) hierarchyDriverBoneNames.add(parent.name);
+      parent = parent.parent;
+    }
+  }
+
   for (const bone of bones){
     bone.updateMatrix();
   }
@@ -232,6 +246,7 @@ export function createRigState(root, fileName=""){
     boneNames: bones.map(b => b.name),
     skinBoneNames,
     weightedBoneNames,
+    hierarchyDriverBoneNames,
     rest,
     animations: Array.isArray(root.animations) ? root.animations : [],
     mixer: new THREE.AnimationMixer(root),
@@ -552,9 +567,15 @@ export function resolveRetargetTargetBone(rig,shortName="",prefix=""){
   // Plain skeleton FBXs often skin directly to the mapped bone.
   if (!deformNames.size) return direct;
 
-  // A control bone can be present in Skeleton.bones while having ZERO
-  // vertex weight. Only accept it directly if it truly influences geometry.
-  if (direct && deformNames.has(direct.name)) return direct;
+  // A control can influence the visible mesh in two ways:
+  // 1) it has direct vertex weights, or
+  // 2) it is an ancestor of weighted deform bones.
+  // Keep those controls as the actual bake target so master controls such as
+  // CloudRig TORSO-Spine visibly rotate and their hierarchy participates.
+  if (direct && (
+    deformNames.has(direct.name)
+    || rig.hierarchyDriverBoneNames?.has(direct.name)
+  )) return direct;
 
   // Control-rig FBXs (Rigify/CloudRig/ARP) usually export both control
   // bones and DEF bones, but Blender constraints are gone. Prefer the
@@ -645,9 +666,9 @@ export function resolveRetargetTargetBone(rig,shortName="",prefix=""){
     if (fuzzy.length === 1) return fuzzy[0];
   }
 
-  // If a direct control exists but has zero vertex influence, returning it
-  // would create a "successful" bake that never moves the visible mesh.
-  // Mark it unresolved instead.
+  // If a direct control exists but has neither vertex influence nor weighted
+  // descendants, returning it would create a successful-looking bake that
+  // never moves the visible mesh. Mark it unresolved instead.
   return null;
 }
 
