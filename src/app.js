@@ -1678,7 +1678,10 @@ async function applyRetarget(){
       ? ` (${result.locationScaleMethod}${result.locationScaleSamples ? `, n=${result.locationScaleSamples}` : ""})`
       : "";
     const rootMotionText = result.rootMotionChannels
-      ? ` Root motion: ${result.rootMotionChannels} canal(es) sobre el objeto completo${result.rootMotionSources?.length ? ` desde ${result.rootMotionSources.join(", ")}` : ""}.`
+      ? ` Root motion LOC: ${result.rootMotionChannels} canal(es) sobre el objeto completo${result.rootMotionSources?.length ? ` desde ${result.rootMotionSources.join(", ")}` : ""}.`
+      : "";
+    const rootRotationText = result.rootRotationChannels
+      ? ` Root motion ROT: ${result.rootRotationChannels} canal(es) sobre el objeto completo${result.rootRotationSources?.length ? ` desde ${result.rootRotationSources.join(", ")}` : ""}.`
       : "";
     const splitRootText = result.splitRootMappings?.length
       ? ` Set-as-Root separado: ${result.splitRootMappings.join("; ")} (ROT al deform, LOC al objeto).`
@@ -1688,7 +1691,7 @@ async function applyRetarget(){
           .map(x => `${x.sources.join("+")}→${x.target}`)
           .join("; ")}.`
       : "";
-    let message = `Retarget FK terminado: ${result.validPairs}/${result.totalPairs} pares, cuerpo ${coverage.coreValid}/${coverage.coreTotal}, dedos ${coverage.fingerValid}/${coverage.fingerTotal}, ${result.frameCount} frames, scale ${result.locationScale.toFixed(4)}${scaleMethod}.${rootMotionText}${splitRootText}${collapsedText}${redirectedText}${unresolvedText}`;
+    let message = `Retarget FK terminado: ${result.validPairs}/${result.totalPairs} pares, cuerpo ${coverage.coreValid}/${coverage.coreTotal}, dedos ${coverage.fingerValid}/${coverage.fingerTotal}, ${result.frameCount} frames, scale ${result.locationScale.toFixed(4)}${scaleMethod}.${rootMotionText}${rootRotationText}${splitRootText}${collapsedText}${redirectedText}${unresolvedText}`;
 
     if (els.autoBakeIk.checked && state.ikChains.length){
       try{
