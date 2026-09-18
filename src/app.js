@@ -629,6 +629,149 @@ function persistCustomPresets(){
   localStorage.setItem("retarget-to-see.customPresets",JSON.stringify(state.customPresets));
 }
 
+function loadCustomRestPoses(){
+  try{
+    const raw = localStorage.getItem("retarget-to-see.customRestPoses");
+    state.customRestPoses = raw ? JSON.parse(raw) : [];
+    if (!Array.isArray(state.customRestPoses)) state.customRestPoses = [];
+  }catch{
+    state.customRestPoses = [];
+  }
+}
+
+function persistCustomRestPoses(){
+  localStorage.setItem("retarget-to-see.customRestPoses",JSON.stringify(state.customRestPoses));
+}
+
+async function loadRestPoseManifest(){
+  try{
+    const res = await fetch("./rest_pose_presets/index.json",{cache:"no-store"});
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    state.restPoseManifest = data.presets || [];
+  }catch(err){
+    console.warn("Rest pose manifest",err);
+    state.restPoseManifest = [];
+  }
+  loadCustomRestPoses();
+  renderRestPoseSelect();
+}
+
+function renderRestPoseSelect(){
+  const current = els.restPoseSelect.value;
+  els.restPoseSelect.innerHTML = '<option value="">— Sin preset —</option>';
+
+  if (state.restPoseManifest.length){
+    const standard = document.createElement("optgroup");
+    standard.label = "Standard Rest Poses";
+    state.restPoseManifest.forEach(p =>
+      standard.appendChild(new Option(p.name,`builtin:${p.file}`))
+    );
+    els.restPoseSelect.appendChild(standard);
+  }
+  if (state.customRestPoses.length){
+    const custom = document.createElement("optgroup");
+    custom.label = "Custom Rest Poses";
+    state.customRestPoses.forEach((p,i) =>
+      custom.appendChild(new Option(p.name || `Pose ${i+1}`,`custom:${i}`))
+    );
+    els.restPoseSelect.appendChild(custom);
+  }
+  els.restPoseSelect.disabled = !(state.restPoseManifest.length || state.customRestPoses.length);
+  if ([...els.restPoseSelect.options].some(o => o.value === current)){
+    els.restPoseSelect.value = current;
+  }
+}
+
+async function loadSelectedRestPose(){
+  const value = els.restPoseSelect.value;
+  state.restPosePreset = null;
+  if (!value){
+    updateButtons();
+    return null;
+  }
+
+  let data = null;
+  if (value.startsWith("builtin:")){
+    const file = value.slice("builtin:".length);
+    const res = await fetch(`./rest_pose_presets/${file}`,{cache:"no-store"});
+    if (!res.ok) throw new Error(`No pude cargar rest pose ${file}: HTTP ${res.status}`);
+    data = await res.json();
+  } else if (value.startsWith("custom:")){
+    const i = Number(value.slice("custom:".length));
+    if (state.customRestPoses[i]) data = structuredClone(state.customRestPoses[i]);
+  }
+
+  if (!data) return null;
+  state.restPosePreset = data;
+  // BlendCap v5 stores this flag with each preset. Old presets without
+  // the field historically behaved as full loc/scale.
+  els.includeRestLocScale.checked = data.include_loc_scale === undefined
+    ? true
+    : Boolean(data.include_loc_scale);
+  updateRestPoseControls();
+  updateButtons();
+  return data;
+}
+
+function updateRestPoseControls(){
+  const anyRest = els.useCurrentRest.checked || els.useCustomRest.checked;
+  els.includeRestLocScale.disabled = !anyRest;
+  els.restPoseSelect.disabled = !els.useCustomRest.checked
+    || !(state.restPoseManifest.length || state.customRestPoses.length);
+  els.previewRestBtn.disabled = state.busy
+    || !state.sourceRig
+    || !els.useCustomRest.checked
+    || !state.restPosePreset;
+  els.saveRestBtn.disabled = state.busy || !state.sourceRig;
+}
+
+function previewSelectedRestPose(){
+  if (!state.sourceRig || !state.restPosePreset) return;
+  state.playing = false;
+  els.playBtn.textContent = "▶";
+  try{
+    const count = previewRestPosePreset(state.sourceRig,state.restPosePreset,{
+      sourcePrefix:els.sourcePrefix.value || "",
+      includeLocScale:els.includeRestLocScale.checked
+    });
+    setStatus(`Preview de "${state.restPosePreset.name || "Rest Pose"}": ${count} huesos aplicados. Mover el timeline restaura la animación.`,"success");
+  }catch(err){
+    console.error(err);
+    setStatus(err.message || String(err),"error");
+  }
+}
+
+function saveCurrentRestPose(){
+  if (!state.sourceRig) return;
+  const name = prompt("Nombre del rest-pose preset:","Mi Rest Pose");
+  if (!name) return;
+  try{
+    const data = captureRestPosePreset(state.sourceRig,{
+      name,
+      includeLocScale:els.includeRestLocScale.checked
+    });
+    if (!Object.keys(data.bones || {}).length){
+      setStatus("La pose actual coincide con el rest pose importado; no hay cambios que guardar.","error");
+      return;
+    }
+    state.customRestPoses.push(data);
+    persistCustomRestPoses();
+    renderRestPoseSelect();
+    els.restPoseSelect.value = `custom:${state.customRestPoses.length-1}`;
+    state.restPosePreset = data;
+    els.useCustomRest.checked = true;
+    els.useCurrentRest.checked = false;
+    updateRestPoseControls();
+    const blob = new Blob([JSON.stringify(data,null,2)],{type:"application/json"});
+    downloadBlob(blob,`${safeBaseName(name)}.rest-pose.json`);
+    setStatus(`Rest pose "${name}" guardado localmente y descargado como JSON.`,"success");
+  }catch(err){
+    console.error(err);
+    setStatus(err.message || String(err),"error");
+  }
+}
+
 function renderPresetSelect(){
   const current = els.presetSelect.value;
   els.presetSelect.innerHTML = '<option value="">— Sin preset —</option>';
@@ -726,10 +869,12 @@ function setBusy(busy){
 function updateButtons(){
   const {sourcePrefix,targetPrefix} = currentPrefixes();
   const valid = countValidPairs(state.pairs,state.sourceRig,state.targetRig,sourcePrefix,targetPrefix).valid;
-  els.applyBtn.disabled = state.busy || !state.sourceRig || !state.targetRig || !state.sourceClip || valid === 0;
+  const customRestReady = !els.useCustomRest.checked || Boolean(state.restPosePreset);
+  els.applyBtn.disabled = state.busy || !state.sourceRig || !state.targetRig || !state.sourceClip || valid === 0 || !customRestReady;
   els.convertIkBtn.disabled = state.busy || !state.targetRig || !state.retargetClip || !state.ikChains.length;
   els.exportGlbBtn.disabled = state.busy || !state.targetRig || !state.retargetClip;
   els.exportClipBtn.disabled = state.busy || !state.retargetClip;
+  updateRestPoseControls();
 }
 
 async function applyRetarget(){
@@ -751,6 +896,8 @@ async function applyRetarget(){
       fps:Number(els.fpsInput.value) || 30,
       autoScale:els.autoScale.checked,
       useCurrentSourcePoseAsRest:els.useCurrentRest.checked,
+      restPosePreset:els.useCustomRest.checked ? state.restPosePreset : null,
+      includeRestLocationScale:els.includeRestLocScale.checked,
       sourceRestTime:restTime,
       useWorldLocation:els.useWorldLocation.checked,
       headSource:els.headSource.value,
