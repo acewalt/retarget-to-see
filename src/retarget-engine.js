@@ -1143,11 +1143,13 @@ function buildWorldFromLocal(parentWorld, pos, quat, scale){
 }
 
 function pairHasRotation(pair){
+  if (pair?.set_as_root) return true;
   const c = String(pair.channels || "ROT").toUpperCase();
   return c === "ROT" || c === "LOC_ROT";
 }
 
 function pairHasLocation(pair){
+  if (pair?.set_as_root) return true;
   const c = String(pair.channels || "ROT").toUpperCase();
   return c === "LOC" || c === "LOC_ROT";
 }
@@ -1215,6 +1217,7 @@ function computeFaceScale(sourceRig,targetRig,pairs,sourcePrefix,targetPrefix,so
 }
 
 function isGlobalRootLocationPair(pair){
+  if (pair?.set_as_root) return false;
   if (!pairHasLocation(pair)) return false;
   const source = normalizeBoneName(pair.source);
   if (source !== "hips" && source !== "pelvis") return false;
@@ -1248,7 +1251,10 @@ function actualPairRecords(pairs,sourceRig,targetRig,sourcePrefix,targetPrefix){
       continue;
     }
 
-    const targetBone = resolveRetargetTargetBone(targetRig,raw.target,targetPrefix);
+    const targetBone = raw.set_as_root
+      ? (resolveBone(targetRig,raw.target,targetPrefix)
+        || resolveRetargetTargetBone(targetRig,raw.target,targetPrefix))
+      : resolveRetargetTargetBone(targetRig,raw.target,targetPrefix);
     if (!targetBone) continue;
     out.push({
       ...raw,
@@ -1445,17 +1451,33 @@ export async function bakeRetarget(options){
       // The first rotation row for a target owns its rotation.
       const rotRec = recs.find(pairHasRotation);
       let desiredWorldQ = null;
+      let directLocalRootQ = null;
       if (rotRec){
         const srcRest = sourceRest.get(rotRec.sourceBone.name);
-        const srcPoseQ = new THREE.Quaternion();
-        rotRec.sourceBone.matrixWorld.decompose(new THREE.Vector3(),srcPoseQ,new THREE.Vector3());
         const motionScale = pairMotionScale(rotRec,faceSettings) * Number(rotRec.influence ?? 1);
-        const deltaQ = quatScaledDelta(srcPoseQ,srcRest.worldQuaternion,motionScale);
-        desiredWorldQ = deltaQ.multiply(rest.worldQuaternion.clone()).normalize();
+
+        if (rotRec.set_as_root){
+          // Auto-Rig Pro "Set as Root": translation + rotation. Use the
+          // source LOCAL rotation delta so parent motion (Mixamo Hips) is
+          // not counted twice when Spine is the designated root mapping.
+          const deltaLocalQ = quatScaledDelta(
+            rotRec.sourceBone.quaternion,
+            srcRest.quaternion,
+            motionScale
+          );
+          directLocalRootQ = deltaLocalQ.multiply(rest.quaternion.clone()).normalize();
+        } else {
+          const srcPoseQ = new THREE.Quaternion();
+          rotRec.sourceBone.matrixWorld.decompose(new THREE.Vector3(),srcPoseQ,new THREE.Vector3());
+          const deltaQ = quatScaledDelta(srcPoseQ,srcRest.worldQuaternion,motionScale);
+          desiredWorldQ = deltaQ.multiply(rest.worldQuaternion.clone()).normalize();
+        }
       }
 
       const parentWorld = parentWorldForBone(bone,worldOut,rest);
-      if (desiredWorldQ){
+      if (directLocalRootQ){
+        localQuat = directLocalRootQ;
+      } else if (desiredWorldQ){
         const parentQ = new THREE.Quaternion();
         parentWorld.decompose(new THREE.Vector3(),parentQ,new THREE.Vector3());
         localQuat = parentQ.invert().multiply(desiredWorldQ).normalize();
@@ -1759,6 +1781,7 @@ export function serializeMap(config){
         if (String(p.loc_space || "BASIS").toUpperCase() !== "BASIS") out.loc_space = "head_local";
         if (Math.abs(Number(p.loc_scale ?? 1)-1) > 1e-6) out.loc_scale = Number(p.loc_scale);
       }
+      if (p.set_as_root) out.set_as_root = true;
       return out;
     })
   };
