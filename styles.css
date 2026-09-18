@@ -127,7 +127,7 @@ a:hover{text-decoration:underline}
   border-top:1px solid var(--line);
   background:#171a1f;
   display:grid;
-  grid-template-columns:34px 105px minmax(120px,1fr) auto;
+  grid-template-columns:34px 105px minmax(120px,1fr) auto auto;
   align-items:center;
   gap:10px;
   padding:8px 12px;
@@ -135,6 +135,18 @@ a:hover{text-decoration:underline}
 }
 .transport input[type="range"]{width:100%}
 .transport label{display:flex;align-items:center;gap:6px;color:var(--muted)}
+.camera-sync-label{
+  white-space:nowrap;
+  user-select:none;
+  cursor:pointer;
+}
+.camera-sync-label input{
+  width:15px;
+  height:15px;
+  margin:0;
+  accent-color:var(--accent);
+}
+.camera-sync-label span{color:#c7d5e5}
 .number{width:62px}
 .panel{
   min-width:0;
