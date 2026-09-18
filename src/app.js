@@ -235,6 +235,30 @@ function safeBaseName(name="file"){
   return name.replace(/\.[^.]+$/,"").replace(/[^a-z0-9_\-]+/gi,"_") || "retargeted";
 }
 
+function forceTargetBindPose(root){
+  // The Target is a receiver, never an animation source. FBX files can
+  // contain Actions/Takes and can also be exported while a pose is active.
+  // Reconstruct the bind pose from each SkinnedMesh's inverse bind matrices
+  // before we snapshot the Target rest transforms.
+  const skeletons = new Set();
+  let skinnedMeshes = 0;
+
+  root.updateMatrixWorld(true);
+  root.traverse(obj => {
+    if (!obj.isSkinnedMesh || !obj.skeleton) return;
+    skinnedMeshes++;
+    if (skeletons.has(obj.skeleton)) return;
+    obj.skeleton.pose();
+    skeletons.add(obj.skeleton);
+  });
+  root.updateMatrixWorld(true);
+
+  return {
+    skeletonCount:skeletons.size,
+    skinnedMeshes
+  };
+}
+
 async function loadFbx(file,kind){
   if (!file) return;
   setStatus(`Cargando ${kind}: ${file.name}…`);
@@ -248,6 +272,18 @@ async function loadFbx(file,kind){
     throw new Error(`No pude leer ${file.name} como FBX: ${err.message || err}`);
   }
   root.name ||= safeBaseName(file.name);
+
+  // Source keeps its embedded clips because those are the motion to read.
+  // Target clips are deliberately ignored: Target must enter the pipeline
+  // as a static rig in bind/rest pose and only receive the baked Source clip.
+  let ignoredTargetClips = 0;
+  let targetBindInfo = null;
+  if (kind === "Target"){
+    ignoredTargetClips = Array.isArray(root.animations) ? root.animations.length : 0;
+    targetBindInfo = forceTargetBindPose(root);
+    root.animations = [];
+  }
+
   root.updateMatrixWorld(true);
   const rig = createRigState(root,file.name);
   if (!rig.bones.length) throw new Error(`${file.name} no contiene huesos FBX detectables.`);
@@ -263,12 +299,29 @@ async function loadFbx(file,kind){
   } else {
     state.targetRig = rig;
     state.retargetClip = null;
+
+    // Explicitly stop/clear any mixer state and keep Target at the rest pose
+    // captured *after* skeleton.pose(). No imported Target Action is allowed
+    // to participate in preview or retargeting.
+    resetRigToRest(rig);
+
     targetView.setRig(rig);
     els.targetDropHint.hidden = true;
-    els.targetMeta.textContent = `${file.name} · ${rig.bones.length} huesos`;
+    const ignored = ignoredTargetClips
+      ? ` · ${ignoredTargetClips} clips ignorados`
+      : "";
+    els.targetMeta.textContent = `${file.name} · ${rig.bones.length} huesos${ignored}`;
     els.exportGlbBtn.disabled = true;
     els.exportClipBtn.disabled = true;
     els.convertIkBtn.disabled = true;
+
+    const bindDetail = targetBindInfo?.skeletonCount
+      ? ` Bind pose restaurado desde ${targetBindInfo.skeletonCount} skeleton(s).`
+      : " No se encontró un SkinnedMesh con bind pose; se usa la pose estática importada.";
+    setStatus(
+      `Target cargado en pose neutral. ${ignoredTargetClips} Action/clip(s) del Target ignorados.${bindDetail}`,
+      "success"
+    );
   }
 
   populateBoneLists();
@@ -276,7 +329,9 @@ async function loadFbx(file,kind){
   updateValidCount();
   updateTransport();
   updateButtons();
-  setStatus(`${kind} cargado: ${file.name}.`,"success");
+  if (kind === "Source"){
+    setStatus(`Source cargado: ${file.name}.`,"success");
+  }
 }
 
 function populateSourceClips(){
