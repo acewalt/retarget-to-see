@@ -713,6 +713,7 @@ export async function bakeRetarget(options){
     sourceRig,targetRig,sourceClip,pairs=[],
     sourcePrefix="",targetPrefix="",
     fps=30,autoScale=true,useCurrentSourcePoseAsRest=false,
+    restPosePreset=null,includeRestLocationScale=false,
     useWorldLocation=false,headSource="",headTarget="",
     faceSettings={global:1,perRegion:false,regions:{}},
     onProgress
@@ -729,7 +730,16 @@ export async function bakeRetarget(options){
   if (Number.isFinite(options.sourceRestTime)){
     setRigTime(sourceRig,options.sourceRestTime);
   }
-  const sourceRest = sourceRestForBake(sourceRig,useCurrentSourcePoseAsRest);
+  const sourceRest = restPosePreset
+    ? buildRestOverrideFromPreset(sourceRig,restPosePreset,{
+        sourcePrefix,
+        includeLocScale:Boolean(includeRestLocationScale)
+      })
+    : sourceRestForBake(
+        sourceRig,
+        useCurrentSourcePoseAsRest,
+        Boolean(includeRestLocationScale)
+      );
 
   const records = actualPairRecords(pairs,sourceRig,targetRig,sourcePrefix,targetPrefix);
   if (!records.length) throw new Error("Ningún par del mapa existe en ambos FBX.");
