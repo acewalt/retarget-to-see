@@ -906,6 +906,15 @@ function detailedMappingCoverage(){
     }
   }
 
+  const unresolvedCore = state.pairs
+    .filter(pair => !isFingerPair(pair))
+    .filter(pair => {
+      const source = resolveBone(state.sourceRig,pair.source,sourcePrefix);
+      const target = resolveRetargetTargetBone(state.targetRig,pair.target,targetPrefix);
+      return !(source && target);
+    })
+    .map(pair => `${pair.source} → ${pair.target}`);
+
   return {
     valid,
     total:state.pairs.length,
@@ -913,7 +922,8 @@ function detailedMappingCoverage(){
     coreTotal,
     coreValid,
     fingerTotal,
-    fingerValid
+    fingerValid,
+    unresolvedCore
   };
 }
 
@@ -1288,12 +1298,13 @@ async function applyRetarget(){
     const {sourcePrefix,targetPrefix} = currentPrefixes();
     const coverage = detailedMappingCoverage();
 
-    // Finger mappings are optional. A CloudRig FBX can legitimately omit
-    // or rename all 30 finger controls while the complete body (23 pairs)
-    // is perfectly retargetable.
-    if (coverage.coreTotal >= 6 && coverage.coreValid / coverage.coreTotal < 0.60){
+    // Finger mappings are optional, and CloudRig/Rigify FBXs frequently
+    // rename/split several limb deform bones. Do not hard-block a useful
+    // partial body bake while the resolver is still able to drive enough
+    // weighted bones. Only reject a truly unusable map.
+    if (coverage.coreTotal >= 6 && coverage.coreValid < Math.min(6,coverage.coreTotal)){
       throw new Error(
-        `Faltan demasiados huesos del cuerpo: ${coverage.coreValid}/${coverage.coreTotal}. Los dedos no bloquean el retarget, pero el cuerpo sí debe estar suficientemente mapeado.`
+        `Solo se resolvieron ${coverage.coreValid}/${coverage.coreTotal} huesos del cuerpo; no hay suficiente información para un retarget útil.`
       );
     }
 
@@ -1325,7 +1336,10 @@ async function applyRetarget(){
     const redirectedText = coverage.redirected
       ? ` ${coverage.redirected} controles fueron redirigidos a deform bones skinned.`
       : "";
-    let message = `Retarget FK terminado: ${result.validPairs}/${result.totalPairs} pares, ${result.frameCount} frames, scale ${result.locationScale.toFixed(4)}.${redirectedText}`;
+    const unresolvedText = coverage.unresolvedCore?.length
+      ? ` Sin resolver: ${coverage.unresolvedCore.slice(0,6).join(", ")}${coverage.unresolvedCore.length > 6 ? "…" : ""}`
+      : "";
+    let message = `Retarget FK terminado: ${result.validPairs}/${result.totalPairs} pares, cuerpo ${coverage.coreValid}/${coverage.coreTotal}, dedos ${coverage.fingerValid}/${coverage.fingerTotal}, ${result.frameCount} frames, scale ${result.locationScale.toFixed(4)}.${redirectedText}${unresolvedText}`;
 
     if (els.autoBakeIk.checked && state.ikChains.length){
       try{
