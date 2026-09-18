@@ -235,6 +235,13 @@ button:disabled{opacity:.42;cursor:not-allowed}
 }
 .map-row:last-child{border-bottom:0}
 .map-row.invalid{background:rgba(139,41,48,.12)}
+.map-row.optional-missing{
+  background:rgba(160,115,35,.10);
+}
+.map-row.optional-missing input,
+.map-row.optional-missing select{
+  border-color:#66532c;
+}
 .map-row input,.map-row select{
   min-width:0;
   min-height:27px;
