@@ -155,7 +155,15 @@ function decomposeWorld(matrix){
 export function createRigState(root, fileName=""){
   root.updateMatrixWorld(true);
   const bones = [];
-  root.traverse(o => { if (o.isBone) bones.push(o); });
+  const skinBoneNames = new Set();
+  root.traverse(o => {
+    if (o.isBone) bones.push(o);
+    if (o.isSkinnedMesh && o.skeleton?.bones){
+      for (const b of o.skeleton.bones){
+        if (b?.name) skinBoneNames.add(b.name);
+      }
+    }
+  });
   const boneMap = new Map();
   const rest = new Map();
 
@@ -190,6 +198,7 @@ export function createRigState(root, fileName=""){
     bones,
     boneMap,
     boneNames: bones.map(b => b.name),
+    skinBoneNames,
     rest,
     animations: Array.isArray(root.animations) ? root.animations : [],
     mixer: new THREE.AnimationMixer(root),
@@ -308,12 +317,111 @@ export function resolveBone(rig, shortName="", prefix=""){
   return null;
 }
 
+
+function anatomicalBoneKey(name=""){
+  let n = looseBoneKey(name);
+  if (!n) return "";
+
+  // Strip rig-role prefixes. Unlike normalizeBoneName(), this deliberately
+  // treats FK/DEF/ORG versions of the same anatomical bone as equivalent.
+  n = n
+    .replace(/^(def|org|mch|fk|ik|ctrl|control|bone)+/,"")
+    .replace(/^c(?=[a-z])/,"")
+    .replace(/finger/g,"")
+    .replace(/left/g,"l")
+    .replace(/right/g,"r")
+    .replace(/upperarm/g,"arm")
+    .replace(/lowerarm/g,"forearm")
+    .replace(/upleg/g,"thigh")
+    .replace(/upperleg/g,"thigh")
+    .replace(/lowerleg/g,"shin")
+    .replace(/knee/g,"shin")
+    .replace(/toebase/g,"toe")
+    .replace(/toes/g,"toe")
+    .replace(/pinky/g,"little")
+    .replace(/clavicle/g,"shoulder");
+
+  // CloudRig locomotion/control names. In an FBX without Blender
+  // constraints these controls cannot drive the skinned skeleton, so map
+  // their motion directly to the pelvis/hips deform bone.
+  if (n === "root" || n === "hipspine" || n === "torsospine") return "hips";
+
+  return n;
+}
+
+function skinBoneCandidates(rig,key){
+  if (!rig?.skinBoneNames?.size || !key) return [];
+  const out = [];
+  for (const bone of rig.bones){
+    if (!rig.skinBoneNames.has(bone.name)) continue;
+    const k = anatomicalBoneKey(bone.name);
+    if (k === key) out.push(bone);
+  }
+  return out;
+}
+
+export function resolveRetargetTargetBone(rig,shortName="",prefix=""){
+  if (!rig || !shortName) return null;
+
+  const direct = resolveBone(rig,shortName,prefix);
+
+  // Plain skeleton FBXs often skin directly to the mapped bone.
+  if (!rig.skinBoneNames?.size) return direct;
+  if (direct && rig.skinBoneNames.has(direct.name)) return direct;
+
+  // Control-rig FBXs (Rigify/CloudRig/ARP) usually export both control
+  // bones and DEF bones, but Blender constraints are gone. Prefer the
+  // equivalent skinned/deform bone so the visible mesh actually moves.
+  const key = anatomicalBoneKey(shortName);
+  let candidates = skinBoneCandidates(rig,key);
+  if (candidates.length === 1) return candidates[0];
+
+  // A few rigs use pelvis rather than hips.
+  if (key === "hips"){
+    candidates = [
+      ...skinBoneCandidates(rig,"pelvis"),
+      ...skinBoneCandidates(rig,"hip")
+    ];
+    const unique = [...new Set(candidates)];
+    if (unique.length === 1) return unique[0];
+  }
+
+  // Spine/chest naming frequently uses numbered deform bones. Use a
+  // conservative token match only when there is a unique skinned result.
+  const side = /(?:^|[^a-z])(l|r)$/.exec(key)?.[1] || "";
+  const tokens = [];
+  if (key.includes("chest")) tokens.push("chest","spine2","spine3");
+  else if (key === "spine" || key.startsWith("spine")) tokens.push("spine","spine1");
+  else if (key.includes("shoulder")) tokens.push("shoulder","clavicle");
+
+  if (tokens.length){
+    const fuzzy = rig.bones.filter(b => {
+      if (!rig.skinBoneNames.has(b.name)) return false;
+      const k = anatomicalBoneKey(b.name);
+      if (side && !k.endsWith(side)) return false;
+      return tokens.some(t => k.includes(t));
+    });
+    if (fuzzy.length === 1) return fuzzy[0];
+  }
+
+  // If no deform equivalent is identifiable, keep the direct mapped bone.
+  // This preserves support for FBXs whose controls are intentionally usable.
+  return direct;
+}
+
 export function countValidPairs(pairs, sourceRig, targetRig, sourcePrefix="", targetPrefix=""){
   let valid = 0;
+  let redirected = 0;
   for (const p of pairs || []){
-    if (resolveBone(sourceRig,p.source,sourcePrefix) && resolveBone(targetRig,p.target,targetPrefix)) valid++;
+    const source = resolveBone(sourceRig,p.source,sourcePrefix);
+    const directTarget = resolveBone(targetRig,p.target,targetPrefix);
+    const target = resolveRetargetTargetBone(targetRig,p.target,targetPrefix);
+    if (source && target){
+      valid++;
+      if (directTarget && target !== directTarget) redirected++;
+    }
   }
-  return {valid,total:(pairs || []).length};
+  return {valid,total:(pairs || []).length,redirected};
 }
 
 function targetCandidateMap(targetRig){
@@ -769,7 +877,7 @@ function actualPairRecords(pairs,sourceRig,targetRig,sourcePrefix,targetPrefix){
   const out = [];
   for (const raw of pairs || []){
     const sourceBone = resolveBone(sourceRig,raw.source,sourcePrefix);
-    const targetBone = resolveBone(targetRig,raw.target,targetPrefix);
+    const targetBone = resolveRetargetTargetBone(targetRig,raw.target,targetPrefix);
     if (!sourceBone || !targetBone) continue;
     out.push({
       ...raw,
@@ -1053,7 +1161,7 @@ function replaceTracks(baseTracks,newTracks){
 
 function targetFromSourceCanonical(pairs,sourceName,targetRig,targetPrefix){
   const p = findPairBySource(pairs,sourceName);
-  return p ? resolveBone(targetRig,p.target,targetPrefix) : null;
+  return p ? resolveRetargetTargetBone(targetRig,p.target,targetPrefix) : null;
 }
 
 function fallbackBoneByKeywords(rig,side,parts){
