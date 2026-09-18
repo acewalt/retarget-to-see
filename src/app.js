@@ -79,6 +79,7 @@ const els = {
   timeline:$("timeline"),
   timeLabel:$("timeLabel"),
   fpsInput:$("fpsInput"),
+  syncCameras:$("syncCameras"),
   frameSourceBtn:$("frameSourceBtn"),
   frameTargetBtn:$("frameTargetBtn")
 };
@@ -135,6 +136,13 @@ class RigViewport{
     this.helper = null;
     this.rig = null;
 
+    // Camera-link reference values. Each viewport keeps its own framing
+    // center/radius so the same orbit/zoom can be mirrored across rigs of
+    // very different sizes without copying absolute world coordinates.
+    this.frameCenter = this.controls.target.clone();
+    this.frameRadius = 1;
+    this.frameDistance = this.camera.position.distanceTo(this.controls.target);
+
     this.resizeObserver = new ResizeObserver(() => this.resize());
     this.resizeObserver.observe(container);
     this.resize();
@@ -186,6 +194,11 @@ class RigViewport{
     const radius = Math.max(size.length()*.5,.1);
     const distance = radius / Math.tan(THREE.MathUtils.degToRad(this.camera.fov*.5)) * 1.25;
     const direction = new THREE.Vector3(1,.45,1).normalize();
+
+    this.frameCenter.copy(center);
+    this.frameRadius = radius;
+    this.frameDistance = distance;
+
     this.camera.position.copy(center).addScaledVector(direction,distance);
     this.camera.near = Math.max(.001,distance/1000);
     this.camera.far = Math.max(1000,distance*20);
@@ -193,6 +206,36 @@ class RigViewport{
     this.controls.target.copy(center);
     this.controls.update();
     this.grid.position.y = box.min.y;
+  }
+  syncCameraTo(other){
+    if (!other?.rig || !this.rig) return;
+
+    const offset = this.camera.position.clone().sub(this.controls.target);
+    const distance = Math.max(offset.length(),1e-6);
+    const direction = offset.multiplyScalar(1/distance);
+
+    // Keep zoom proportional to each rig's own fitted camera distance.
+    const sourceBaseDistance = Math.max(this.frameDistance || distance,1e-6);
+    const zoomRatio = distance/sourceBaseDistance;
+    const targetBaseDistance = Math.max(other.frameDistance || distance,1e-6);
+
+    // Mirror panning proportionally to each rig's framing radius instead of
+    // copying an absolute translation (the characters can have very
+    // different dimensions/origins).
+    const sourceRadius = Math.max(this.frameRadius || 1,1e-6);
+    const targetRadius = Math.max(other.frameRadius || 1,1e-6);
+    const pan = this.controls.target.clone()
+      .sub(this.frameCenter)
+      .multiplyScalar(targetRadius/sourceRadius);
+
+    other.controls.target.copy(other.frameCenter).add(pan);
+    other.camera.position.copy(other.controls.target)
+      .addScaledVector(direction,targetBaseDistance*zoomRatio);
+
+    other.camera.near = Math.max(.001,(targetBaseDistance*zoomRatio)/1000);
+    other.camera.far = Math.max(1000,targetBaseDistance*zoomRatio*20);
+    other.camera.updateProjectionMatrix();
+    other.controls.update();
   }
   render(){
     this.controls.update();
@@ -203,6 +246,43 @@ class RigViewport{
 
 const sourceView = new RigViewport(els.sourceViewport);
 const targetView = new RigViewport(els.targetViewport);
+
+let activeCameraSyncView = null;
+let cameraSyncUpdating = false;
+
+function syncViewportCamera(from,to){
+  if (!els.syncCameras?.checked) return;
+  if (cameraSyncUpdating) return;
+  if (!from?.rig || !to?.rig) return;
+  if (activeCameraSyncView && activeCameraSyncView !== from) return;
+
+  cameraSyncUpdating = true;
+  try{
+    from.syncCameraTo(to);
+  }finally{
+    cameraSyncUpdating = false;
+  }
+}
+
+function bindLinkedCameraControls(view,other){
+  view.controls.addEventListener("start",() => {
+    activeCameraSyncView = view;
+  });
+  view.controls.addEventListener("change",() => {
+    syncViewportCamera(view,other);
+  });
+  view.controls.addEventListener("end",() => {
+    // OrbitControls damping continues briefly after pointer-up. Keep this
+    // viewport as the driver for a short interval to avoid camera ping-pong.
+    const finishing = view;
+    setTimeout(() => {
+      if (activeCameraSyncView === finishing) activeCameraSyncView = null;
+    },220);
+  });
+}
+
+bindLinkedCameraControls(sourceView,targetView);
+bindLinkedCameraControls(targetView,sourceView);
 
 function setStatus(message,kind=""){
   els.status.textContent = message;
@@ -516,6 +596,14 @@ async function loadFbx(file,kind){
   updateValidCount();
   updateTransport();
   updateButtons();
+
+  // If the other rig was already loaded/orbited, bring the newly loaded
+  // viewport immediately to the same camera orientation.
+  if (els.syncCameras?.checked && state.sourceRig && state.targetRig){
+    if (kind === "Target") syncViewportCamera(sourceView,targetView);
+    else syncViewportCamera(targetView,sourceView);
+  }
+
   if (kind === "Source"){
     setStatus(`Source cargado: ${file.name}.`,"success");
   }
@@ -1758,8 +1846,22 @@ els.applyBtn.addEventListener("click",applyRetarget);
 els.convertIkBtn.addEventListener("click",convertIk);
 els.exportGlbBtn.addEventListener("click",exportGlb);
 els.exportClipBtn.addEventListener("click",exportClipJson);
-els.frameSourceBtn.addEventListener("click",() => sourceView.frame());
-els.frameTargetBtn.addEventListener("click",() => targetView.frame());
+els.frameSourceBtn.addEventListener("click",() => {
+  sourceView.frame();
+  syncViewportCamera(sourceView,targetView);
+});
+els.frameTargetBtn.addEventListener("click",() => {
+  targetView.frame();
+  syncViewportCamera(targetView,sourceView);
+});
+els.syncCameras.addEventListener("change",() => {
+  if (els.syncCameras.checked && state.sourceRig && state.targetRig){
+    syncViewportCamera(sourceView,targetView);
+    setStatus("Mirror cámaras activado: órbita, zoom y paneo quedan vinculados.","success");
+  }else if (!els.syncCameras.checked){
+    setStatus("Mirror cámaras desactivado. Cada viewport puede moverse de forma independiente.");
+  }
+});
 
 els.timeline.addEventListener("input",() => {
   state.playing = false;
