@@ -156,11 +156,42 @@ export function createRigState(root, fileName=""){
   root.updateMatrixWorld(true);
   const bones = [];
   const skinBoneNames = new Set();
+  const weightedBoneNames = new Set();
+
   root.traverse(o => {
     if (o.isBone) bones.push(o);
+
     if (o.isSkinnedMesh && o.skeleton?.bones){
       for (const b of o.skeleton.bones){
         if (b?.name) skinBoneNames.add(b.name);
+      }
+
+      // Skeleton.bones can contain exported control bones with zero actual
+      // vertex influence. For retargeting an FBX control rig we care about
+      // bones that REALLY deform the mesh, so inspect non-zero skin weights.
+      const skinIndex = o.geometry?.getAttribute?.("skinIndex");
+      const skinWeight = o.geometry?.getAttribute?.("skinWeight");
+      if (skinIndex && skinWeight){
+        const count = Math.min(skinIndex.count,skinWeight.count);
+        for (let i=0;i<count;i++){
+          const indices = [
+            skinIndex.getX(i),
+            skinIndex.getY(i),
+            skinIndex.getZ(i),
+            skinIndex.getW(i)
+          ];
+          const weights = [
+            skinWeight.getX(i),
+            skinWeight.getY(i),
+            skinWeight.getZ(i),
+            skinWeight.getW(i)
+          ];
+          for (let j=0;j<4;j++){
+            if (weights[j] <= 1e-6) continue;
+            const bone = o.skeleton.bones[Math.round(indices[j])];
+            if (bone?.name) weightedBoneNames.add(bone.name);
+          }
+        }
       }
     }
   });
@@ -199,6 +230,7 @@ export function createRigState(root, fileName=""){
     boneMap,
     boneNames: bones.map(b => b.name),
     skinBoneNames,
+    weightedBoneNames,
     rest,
     animations: Array.isArray(root.animations) ? root.animations : [],
     mixer: new THREE.AnimationMixer(root),
@@ -374,13 +406,14 @@ function fingerDescriptor(name=""){
 }
 
 function findFingerDeformBone(rig,name){
-  if (!rig?.skinBoneNames?.size) return null;
+  const deformNames = deformBoneNameSet(rig);
+  if (!deformNames.size) return null;
   const wanted = fingerDescriptor(name);
   if (!wanted) return null;
 
   const candidates = [];
   for (const bone of rig.bones){
-    if (!rig.skinBoneNames.has(bone.name)) continue;
+    if (!deformNames.has(bone.name)) continue;
     const got = fingerDescriptor(bone.name);
     if (!got) continue;
     if (got.family !== wanted.family) continue;
@@ -392,11 +425,17 @@ function findFingerDeformBone(rig,name){
   return candidates.length === 1 ? candidates[0] : null;
 }
 
+function deformBoneNameSet(rig){
+  if (rig?.weightedBoneNames?.size) return rig.weightedBoneNames;
+  return rig?.skinBoneNames || new Set();
+}
+
 function skinBoneCandidates(rig,key){
-  if (!rig?.skinBoneNames?.size || !key) return [];
+  const deformNames = deformBoneNameSet(rig);
+  if (!deformNames.size || !key) return [];
   const out = [];
   for (const bone of rig.bones){
-    if (!rig.skinBoneNames.has(bone.name)) continue;
+    if (!deformNames.has(bone.name)) continue;
     const k = anatomicalBoneKey(bone.name);
     if (k === key) out.push(bone);
   }
@@ -407,14 +446,18 @@ export function resolveRetargetTargetBone(rig,shortName="",prefix=""){
   if (!rig || !shortName) return null;
 
   const direct = resolveBone(rig,shortName,prefix);
+  const deformNames = deformBoneNameSet(rig);
 
   // Plain skeleton FBXs often skin directly to the mapped bone.
-  if (!rig.skinBoneNames?.size) return direct;
-  if (direct && rig.skinBoneNames.has(direct.name)) return direct;
+  if (!deformNames.size) return direct;
+
+  // A control bone can be present in Skeleton.bones while having ZERO
+  // vertex weight. Only accept it directly if it truly influences geometry.
+  if (direct && deformNames.has(direct.name)) return direct;
 
   // Control-rig FBXs (Rigify/CloudRig/ARP) usually export both control
   // bones and DEF bones, but Blender constraints are gone. Prefer the
-  // equivalent skinned/deform bone so the visible mesh actually moves.
+  // equivalent weighted deform bone so the visible mesh actually moves.
   const key = anatomicalBoneKey(shortName);
   let candidates = skinBoneCandidates(rig,key);
   if (candidates.length === 1) return candidates[0];
@@ -444,7 +487,7 @@ export function resolveRetargetTargetBone(rig,shortName="",prefix=""){
 
   if (tokens.length){
     const fuzzy = rig.bones.filter(b => {
-      if (!rig.skinBoneNames.has(b.name)) return false;
+      if (!deformNames.has(b.name)) return false;
       const k = anatomicalBoneKey(b.name);
       if (side && !k.endsWith(side)) return false;
       return tokens.some(t => k.includes(t));
