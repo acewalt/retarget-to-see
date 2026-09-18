@@ -57,6 +57,44 @@ export function normalizeBoneName(name=""){
   return n;
 }
 
+function looseBoneKey(name=""){
+  let n = String(name).trim().toLowerCase();
+  if (!n) return "";
+
+  n = n.replace(/\\/g,"/").replace(/\|/g,":");
+
+  // Normal namespace form: "rig:FK-Thigh.L", "mixamorig1:Hips".
+  const colon = n.lastIndexOf(":");
+  if (colon >= 0) n = n.slice(colon + 1);
+
+  // Three.js/FBXLoader can flatten namespace punctuation in node names,
+  // producing e.g. "mixamorig1Hips" or "rigFK-ThighL". Strip those
+  // well-known namespace prefixes even when no separator survived.
+  n = n
+    .replace(/^(mixamorig\d*|armature\d*|skeleton\d*|rig\d*|bip\d*)[_ .:\/-]*/,"")
+    .replace(/^(mixamorig\d*|rig\d*)(?=[a-z])/,"");
+
+  return n.replace(/[^a-z0-9]/g,"");
+}
+
+function semanticBoneKey(name=""){
+  let n = looseBoneKey(name);
+  if (!n) return "";
+
+  // Secondary key only for fallback. It bridges common naming dialects
+  // without erasing FK/IK/control semantics.
+  n = n
+    .replace(/left/g,"l")
+    .replace(/right/g,"r")
+    .replace(/upperarm/g,"arm")
+    .replace(/lowerarm/g,"forearm")
+    .replace(/upleg/g,"thigh")
+    .replace(/upperleg/g,"thigh")
+    .replace(/lowerleg/g,"shin")
+    .replace(/toebase/g,"toe");
+  return n;
+}
+
 export function stripKnownPrefix(name="", prefix=""){
   const n = String(name);
   if (prefix && n.startsWith(prefix)) return n.slice(prefix.length);
@@ -220,20 +258,54 @@ export function setRigTime(rig, time){
 
 export function resolveBone(rig, shortName="", prefix=""){
   if (!rig || !shortName) return null;
-  const n = String(shortName);
-  if (rig.boneMap.has(n)) return rig.boneMap.get(n);
-  if (prefix && rig.boneMap.has(prefix + n)) return rig.boneMap.get(prefix + n);
+  const n = String(shortName).trim();
+  if (!n) return null;
 
-  const suffixMatches = [];
-  for (const bone of rig.bones){
-    if (bone.name.endsWith(n)) suffixMatches.push(bone);
+  // 1) Exact paths first.
+  if (rig.boneMap.has(n)) return rig.boneMap.get(n);
+  if (prefix){
+    if (rig.boneMap.has(prefix + n)) return rig.boneMap.get(prefix + n);
+
+    // Prefixes entered by the user often lose ":"/"_" after FBXLoader
+    // sanitization. Try the compact form as well.
+    const compactPrefixed = looseBoneKey(prefix + n);
+    const compactHits = rig.bones.filter(b => looseBoneKey(b.name) === compactPrefixed);
+    if (compactHits.length === 1) return compactHits[0];
   }
+
+  // 2) Literal suffix. Useful for intact Mixamo namespaces.
+  const lower = n.toLowerCase();
+  const suffixMatches = rig.bones.filter(b => b.name.toLowerCase().endsWith(lower));
   if (suffixMatches.length === 1) return suffixMatches[0];
 
+  // 3) Punctuation/namespace-insensitive key. This is the important path
+  // for FBXLoader names such as "rigFK-ThighL" vs preset "FK-Thigh.L".
+  const loose = looseBoneKey(n);
+  if (loose){
+    const looseMatches = rig.bones.filter(b => looseBoneKey(b.name) === loose);
+    if (looseMatches.length === 1) return looseMatches[0];
+    if (looseMatches.length > 1 && prefix){
+      const pp = looseBoneKey(prefix);
+      const preferred = looseMatches.filter(b => looseBoneKey(b.name).startsWith(pp));
+      if (preferred.length === 1) return preferred[0];
+    }
+  }
+
+  // 4) Existing canonical matcher.
   const canon = normalizeBoneName(n);
-  if (!canon) return null;
-  const canonMatches = rig.bones.filter(b => normalizeBoneName(b.name) === canon);
-  return canonMatches.length === 1 ? canonMatches[0] : null;
+  if (canon){
+    const canonMatches = rig.bones.filter(b => normalizeBoneName(b.name) === canon);
+    if (canonMatches.length === 1) return canonMatches[0];
+  }
+
+  // 5) Semantic alias matcher for common rig dialects.
+  const semantic = semanticBoneKey(n);
+  if (semantic){
+    const semanticMatches = rig.bones.filter(b => semanticBoneKey(b.name) === semantic);
+    if (semanticMatches.length === 1) return semanticMatches[0];
+  }
+
+  return null;
 }
 
 export function countValidPairs(pairs, sourceRig, targetRig, sourcePrefix="", targetPrefix=""){
