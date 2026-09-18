@@ -914,17 +914,22 @@ async function applyRetarget(){
     let message = `Retarget FK terminado: ${result.validPairs}/${result.totalPairs} pares, ${result.frameCount} frames, scale ${result.locationScale.toFixed(4)}.`;
 
     if (els.autoBakeIk.checked && state.ikChains.length){
-      const ik = await bakeIkIntoClip({
-        targetRig:state.targetRig,
-        clip:state.retargetClip,
-        pairs:state.pairs,
-        ikChains:state.ikChains,
-        targetPrefix,
-        fps:Number(els.fpsInput.value) || 30,
-        onProgress:setProgress
-      });
-      state.retargetClip = ik.clip;
-      message += ` FK→IK: ${ik.chains} cadenas horneadas.`;
+      try{
+        const ik = await bakeIkIntoClip({
+          targetRig:state.targetRig,
+          clip:state.retargetClip,
+          pairs:state.pairs,
+          ikChains:state.ikChains,
+          targetPrefix,
+          fps:Number(els.fpsInput.value) || 30,
+          onProgress:setProgress
+        });
+        state.retargetClip = ik.clip;
+        message += ` FK→IK: ${ik.chains} cadenas horneadas.`;
+      }catch(ikErr){
+        console.warn("Auto FK→IK skipped",ikErr);
+        message += ` FK→IK omitido: ${ikErr.message || ikErr}`;
+      }
     }
 
     activateClip(state.targetRig,state.retargetClip);
