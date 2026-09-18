@@ -670,7 +670,10 @@ function remapBlenderAxesToThree(mask="XYZ"){
 }
 
 function normalizePair(raw={},axisConvention="THREE_Y_UP"){
-  const channels = String(raw.channels || "ROT").toUpperCase();
+  const setAsRoot = Boolean(raw.set_as_root);
+  const channels = setAsRoot
+    ? "LOC_ROT"
+    : String(raw.channels || "ROT").toUpperCase();
   return {
     source:String(raw.source || ""),
     target:String(raw.target || ""),
@@ -681,7 +684,8 @@ function normalizePair(raw={},axisConvention="THREE_Y_UP"){
     loc_space:String(raw.loc_space || "BASIS").toUpperCase() === "HEAD_LOCAL" ? "HEAD_LOCAL" : "BASIS",
     influence:Number.isFinite(Number(raw.influence)) ? Number(raw.influence) : 1,
     loc_scale:Number.isFinite(Number(raw.loc_scale)) ? Number(raw.loc_scale) : 1,
-    loc_scale_residual:Boolean(raw.loc_scale_residual)
+    loc_scale_residual:Boolean(raw.loc_scale_residual),
+    set_as_root:setAsRoot
   };
 }
 
@@ -814,7 +818,23 @@ function renderMappings(){
       scale.title = "Amplificación por par";
       scale.addEventListener("change",() => pair.loc_scale = Number(scale.value) || 0);
 
-      advanced.append(axesLabel,axes,scaleLabel,scale);
+      const rootLabel = document.createElement("label");
+      rootLabel.className = "mini-check";
+      rootLabel.title = "Set as Root: transfiere Translation + Rotation como en Auto-Rig Pro.";
+      const rootInput = document.createElement("input");
+      rootInput.type = "checkbox";
+      rootInput.checked = Boolean(pair.set_as_root);
+      rootInput.addEventListener("change",() => {
+        pair.set_as_root = rootInput.checked;
+        if (pair.set_as_root) pair.channels = "LOC_ROT";
+        renderMappings();
+        updateValidCount();
+      });
+      const rootText = document.createElement("span");
+      rootText.textContent = "Root";
+      rootLabel.append(rootInput,rootText);
+
+      advanced.append(axesLabel,axes,scaleLabel,scale,rootLabel);
       row.appendChild(advanced);
     }
 
@@ -1025,7 +1045,8 @@ function buildBoneMapDiagnostic(){
       axes:pair.axes,
       loc_space:pair.loc_space,
       influence:pair.influence,
-      loc_scale:pair.loc_scale
+      loc_scale:pair.loc_scale,
+      set_as_root:Boolean(pair.set_as_root)
     };
   });
 
@@ -1170,6 +1191,72 @@ function detailedMappingCoverage(){
     fingerTotal,
     fingerValid,
     unresolvedCore
+  };
+}
+
+function parseAutoRigProBmap(text,name="Auto-Rig Pro .bmap"){
+  const blocks = String(text || "")
+    .replace(/\r/g,"")
+    .trim()
+    .split(/\n\s*\n/)
+    .map(b => b.split("\n").map(x => x.trim()).filter(Boolean))
+    .filter(b => b.length >= 2);
+
+  if (!blocks.length) throw new Error("El archivo .bmap está vacío o no tiene el formato esperado.");
+
+  const pairs = [];
+  const sourcePrefixes = new Map();
+
+  for (const block of blocks){
+    const targetLine = block[0] || "";
+    const sourceFull = block[1] || "";
+    if (!targetLine || !sourceFull) continue;
+
+    const target = targetLine.split("%")[0].trim();
+    let source = sourceFull.trim();
+
+    const colon = source.lastIndexOf(":");
+    if (colon >= 0){
+      const pref = source.slice(0,colon+1);
+      sourcePrefixes.set(pref,(sourcePrefixes.get(pref) || 0) + 1);
+      source = source.slice(colon+1);
+    }
+
+    const setAsRoot = String(block[2] || "").toLowerCase() === "true";
+    const locationLocal = String(block[3] || "").toLowerCase() === "true";
+
+    pairs.push({
+      source,
+      target,
+      channels:setAsRoot || locationLocal ? "LOC_ROT" : "ROT",
+      axes:"XYZ",
+      loc_space:"BASIS",
+      influence:1,
+      set_as_root:setAsRoot
+    });
+  }
+
+  if (!pairs.length) throw new Error("No encontré pares Source → Target dentro del .bmap.");
+
+  let sourcePrefix = "";
+  let best = -1;
+  for (const [pref,count] of sourcePrefixes){
+    if (count > best){
+      sourcePrefix = pref;
+      best = count;
+    }
+  }
+
+  return {
+    name:name.replace(/\.bmap$/i,""),
+    version:1,
+    axis_convention:"THREE_Y_UP",
+    source_prefix:sourcePrefix,
+    namespace_strip:"",
+    auto_bake_ik:false,
+    use_world_location:true,
+    imported_from:"Auto-Rig Pro .bmap",
+    pairs
   };
 }
 
@@ -1749,14 +1836,19 @@ els.presetFile.addEventListener("change",async () => {
   const file = els.presetFile.files[0];
   if (!file) return;
   try{
-    const data = JSON.parse(await file.text());
-    applyPresetData(data,"JSON importado");
+    const raw = await file.text();
+    const isBmap = file.name.toLowerCase().endsWith(".bmap");
+    const data = isBmap
+      ? parseAutoRigProBmap(raw,file.name)
+      : JSON.parse(raw);
+
+    applyPresetData(data,isBmap ? "Auto-Rig Pro .bmap importado" : "JSON importado");
     state.customPresets.push(data);
     persistCustomPresets();
     renderPresetSelect();
     els.presetSelect.value = `custom:${state.customPresets.length-1}`;
   }catch(err){
-    setStatus(`JSON inválido: ${err.message || err}`,"error");
+    setStatus(`Preset inválido: ${err.message || err}`,"error");
   }
   els.presetFile.value = "";
 });
