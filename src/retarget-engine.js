@@ -561,7 +561,8 @@ export function previewRestPosePreset(sourceRig,preset,{
 
 export function captureRestPosePreset(sourceRig,{
   name="Web Rest Pose",
-  includeLocScale=false
+  includeLocScale=false,
+  sourcePrefix=""
 }={}){
   if (!sourceRig) throw new Error("No hay Source Rig.");
   sourceRig.root.updateMatrixWorld(true);
@@ -588,7 +589,7 @@ export function captureRestPosePreset(sourceRig,{
     };
     entry.loc = [poseD.position.x,poseD.position.y,poseD.position.z];
     entry.scale = [poseD.scale.x,poseD.scale.y,poseD.scale.z];
-    bones[stripKnownPrefix(bone.name,"")] = entry;
+    bones[stripKnownPrefix(bone.name,sourcePrefix)] = entry;
   }
 
   return {
