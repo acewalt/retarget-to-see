@@ -851,7 +851,10 @@ function seek(time){
   const d = duration();
   state.currentTime = Math.max(0,Math.min(Number(time) || 0,d));
   if (state.sourceRig && state.sourceClip){
-    if (state.sourceRig.activeClip !== state.sourceClip) activateClip(state.sourceRig,state.sourceClip);
+    if (state.sourceRig.activeClip !== state.sourceClip){
+      resetRigToRest(state.sourceRig);
+      activateClip(state.sourceRig,state.sourceClip);
+    }
     setRigTime(state.sourceRig,state.currentTime);
   }
   if (state.targetRig && state.retargetClip){
