@@ -46,6 +46,7 @@ const els = {
   autoMatchBtn:$("autoMatchBtn"),
   sortBtn:$("sortBtn"),
   clearMapBtn:$("clearMapBtn"),
+  copyBoneMapBtn:$("copyBoneMapBtn"),
   mappingRows:$("mappingRows"),
   sourceBoneList:$("sourceBoneList"),
   targetBoneList:$("targetBoneList"),
@@ -887,6 +888,146 @@ function isFingerPair(pair){
   return /(finger|thumb|index|middle|ring|pinky|little)/.test(text);
 }
 
+function resolveIkDiagnostic(chain){
+  const prefix = els.targetPrefix.value || "";
+  return {
+    limb_kind:chain.limb_kind,
+    side:chain.side,
+    ownerRequested:chain.owner || "",
+    ownerResolved:resolveBone(state.targetRig,chain.owner || "",prefix)?.name || null,
+    controlRequested:chain.ik_control || "",
+    controlResolved:resolveBone(state.targetRig,chain.ik_control || "",prefix)?.name || null,
+    poleRequested:chain.pole_control || "",
+    poleResolved:resolveBone(state.targetRig,chain.pole_control || "",prefix)?.name || null
+  };
+}
+
+function buildBoneMapDiagnostic(){
+  const {sourcePrefix,targetPrefix} = currentPrefixes();
+  const coverage = detailedMappingCoverage();
+
+  const pairs = state.pairs.map((pair,index) => {
+    const sourceResolved = resolveBone(state.sourceRig,pair.source,sourcePrefix);
+    const directTarget = resolveBone(state.targetRig,pair.target,targetPrefix);
+    const targetResolved = resolveRetargetTargetBone(
+      state.targetRig,
+      pair.target,
+      targetPrefix
+    );
+
+    return {
+      index:index + 1,
+      sourceRequested:pair.source,
+      sourceResolved:sourceResolved?.name || null,
+      targetRequested:pair.target,
+      targetDirect:directTarget?.name || null,
+      targetResolved:targetResolved?.name || null,
+      valid:Boolean(sourceResolved && targetResolved),
+      redirected:Boolean(directTarget && targetResolved && directTarget !== targetResolved),
+      targetWeighted:Boolean(
+        targetResolved
+        && state.targetRig?.weightedBoneNames?.has(targetResolved.name)
+      ),
+      optionalFinger:isFingerPair(pair),
+      channels:pair.channels,
+      axes:pair.axes,
+      loc_space:pair.loc_space,
+      influence:pair.influence,
+      loc_scale:pair.loc_scale
+    };
+  });
+
+  return {
+    tool:"Retarget to See — Bone Map Diagnostic",
+    generatedAt:new Date().toISOString(),
+    source:{
+      file:state.sourceRig?.fileName || null,
+      clip:state.sourceClip?.name || null,
+      clipDuration:state.sourceClip?.duration ?? null,
+      prefix:sourcePrefix,
+      boneCount:state.sourceRig?.bones?.length || 0,
+      bones:state.sourceRig?.boneNames || []
+    },
+    target:{
+      file:state.targetRig?.fileName || null,
+      prefix:targetPrefix,
+      boneCount:state.targetRig?.bones?.length || 0,
+      skinBoneCount:state.targetRig?.skinBoneNames?.size || 0,
+      weightedBoneCount:state.targetRig?.weightedBoneNames?.size || 0,
+      weightedBones:[...(state.targetRig?.weightedBoneNames || [])].sort(),
+      skinBones:[...(state.targetRig?.skinBoneNames || [])].sort(),
+      bones:state.targetRig?.boneNames || []
+    },
+    preset:{
+      name:state.preset?.name || null,
+      target_kind:state.preset?.target_kind || null,
+      axis_convention:state.preset?.axis_convention || "BLENDER_Z_UP(default)",
+      auto_bake_ik:Boolean(els.autoBakeIk.checked),
+      auto_scale:Boolean(els.autoScale.checked),
+      use_world_location:Boolean(els.useWorldLocation.checked),
+      use_current_source_pose_as_rest:Boolean(els.useCurrentRest.checked),
+      use_custom_rest_pose:Boolean(els.useCustomRest.checked),
+      custom_rest_pose_name:state.restPosePreset?.name || null,
+      include_rest_location_scale:Boolean(els.includeRestLocScale.checked)
+    },
+    coverage,
+    pairs,
+    ikChains:state.ikChains.map(resolveIkDiagnostic)
+  };
+}
+
+async function writeClipboardText(textValue){
+  if (navigator.clipboard?.writeText){
+    try{
+      await navigator.clipboard.writeText(textValue);
+      return true;
+    }catch(err){
+      console.warn("Clipboard API failed, using fallback",err);
+    }
+  }
+
+  const area = document.createElement("textarea");
+  area.value = textValue;
+  area.setAttribute("readonly","");
+  area.style.position = "fixed";
+  area.style.opacity = "0";
+  area.style.pointerEvents = "none";
+  document.body.appendChild(area);
+  area.select();
+  area.setSelectionRange(0,area.value.length);
+  let ok = false;
+  try{
+    ok = document.execCommand("copy");
+  }catch{
+    ok = false;
+  }
+  area.remove();
+  return ok;
+}
+
+async function copyBoneMapDiagnostic(){
+  const diagnostic = buildBoneMapDiagnostic();
+  const textValue = JSON.stringify(diagnostic,null,2);
+  const ok = await writeClipboardText(textValue);
+
+  if (ok){
+    const old = els.copyBoneMapBtn.textContent;
+    els.copyBoneMapBtn.textContent = "Copiado ✓";
+    setStatus(
+      `Diagnóstico copiado: ${diagnostic.coverage.valid}/${diagnostic.coverage.total} mappings válidos, ${diagnostic.target.weightedBoneCount} deform bones reales. Pégalo en el chat para revisar el mapeo exacto.`,
+      "success"
+    );
+    setTimeout(() => {
+      els.copyBoneMapBtn.textContent = old;
+    },1600);
+  }else{
+    setStatus(
+      "El navegador bloqueó el portapapeles. Prueba de nuevo después de hacer clic dentro de la página.",
+      "error"
+    );
+  }
+}
+
 function detailedMappingCoverage(){
   const {sourcePrefix,targetPrefix} = currentPrefixes();
   let valid = 0;
@@ -1606,6 +1747,7 @@ els.clearMapBtn.addEventListener("click",() => {
   state.pairs = [];
   renderMappings();updateValidCount();
 });
+els.copyBoneMapBtn.addEventListener("click",copyBoneMapDiagnostic);
 
 els.facePerRegion.addEventListener("change",renderFaceRegions);
 els.addIkChainBtn.addEventListener("click",() => {
