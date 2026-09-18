@@ -206,6 +206,13 @@ export function setRigTime(rig, time){
   if (!rig) return;
   const duration = rig.activeClip?.duration || 0;
   const t = duration > 0 ? Math.max(0, Math.min(time, duration)) : 0;
+  // LoopOnce actions become paused when sampled exactly at the final frame.
+  // Unpause before every random-access seek so scrubbing/baking can move
+  // backwards again after touching clip.duration.
+  if (rig.activeAction){
+    rig.activeAction.enabled = true;
+    rig.activeAction.paused = false;
+  }
   rig.mixer.setTime(t);
   rig.root.updateMatrixWorld(true);
   rig.currentTime = t;
