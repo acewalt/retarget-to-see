@@ -9,6 +9,7 @@ import {
   activateClip,
   setRigTime,
   resolveBone,
+  resolveRetargetTargetBone,
   countValidPairs,
   autoMatchPairs,
   stripKnownPrefix,
@@ -584,7 +585,10 @@ function normalizePair(raw={}){
 function updateValidCount(){
   const {sourcePrefix,targetPrefix} = currentPrefixes();
   const result = countValidPairs(state.pairs,state.sourceRig,state.targetRig,sourcePrefix,targetPrefix);
-  els.validCount.textContent = `${result.valid} / ${result.total} válidos`;
+  const redirected = result.redirected
+    ? ` · ${result.redirected} → deform`
+    : "";
+  els.validCount.textContent = `${result.valid} / ${result.total} válidos${redirected}`;
   els.validCount.classList.toggle("bad",result.total > 0 && result.valid < result.total);
   updateButtons();
 }
@@ -610,23 +614,37 @@ function renderMappings(){
     if (filter && !pair.source.toLowerCase().includes(filter) && !pair.target.toLowerCase().includes(filter)) return;
     visible++;
 
-    const valid = Boolean(
-      resolveBone(state.sourceRig,pair.source,sourcePrefix)
-      && resolveBone(state.targetRig,pair.target,targetPrefix)
+    const sourceResolved = resolveBone(state.sourceRig,pair.source,sourcePrefix);
+    const directTarget = resolveBone(state.targetRig,pair.target,targetPrefix);
+    const targetResolved = resolveRetargetTargetBone(
+      state.targetRig,
+      pair.target,
+      targetPrefix
     );
+    const valid = Boolean(sourceResolved && targetResolved);
+
     const row = document.createElement("div");
     row.className = "map-row" + (valid ? "" : " invalid");
 
-    row.appendChild(makeBoneInput(pair.source,"sourceBoneList",(v,commit=true) => {
+    const sourceInput = makeBoneInput(pair.source,"sourceBoneList",(v,commit=true) => {
       pair.source = v;
       updateValidCount();
       if (commit) renderMappings();
-    }));
-    row.appendChild(makeBoneInput(pair.target,"targetBoneList",(v,commit=true) => {
+    });
+    if (sourceResolved) sourceInput.title = `Source real: ${sourceResolved.name}`;
+    row.appendChild(sourceInput);
+
+    const targetInput = makeBoneInput(pair.target,"targetBoneList",(v,commit=true) => {
       pair.target = v;
       updateValidCount();
       if (commit) renderMappings();
-    }));
+    });
+    if (targetResolved){
+      targetInput.title = directTarget && targetResolved !== directTarget
+        ? `Control FBX sin constraints → animando deform bone: ${targetResolved.name}`
+        : `Target real: ${targetResolved.name}`;
+    }
+    row.appendChild(targetInput);
 
     const channels = document.createElement("select");
     for (const [value,label] of [["ROT","Rotation"],["LOC","Location"],["LOC_ROT","Loc + Rot"]]){
@@ -1217,7 +1235,10 @@ async function applyRetarget(){
     });
     state.retargetClip = result.clip;
 
-    let message = `Retarget FK terminado: ${result.validPairs}/${result.totalPairs} pares, ${result.frameCount} frames, scale ${result.locationScale.toFixed(4)}.`;
+    const redirectedText = coverage.redirected
+      ? ` ${coverage.redirected} controles fueron redirigidos a deform bones skinned.`
+      : "";
+    let message = `Retarget FK terminado: ${result.validPairs}/${result.totalPairs} pares, ${result.frameCount} frames, scale ${result.locationScale.toFixed(4)}.${redirectedText}`;
 
     if (els.autoBakeIk.checked && state.ikChains.length){
       try{
