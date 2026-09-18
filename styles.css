@@ -188,6 +188,14 @@ a:hover{text-decoration:underline}
 .file-btn input,.file-inline input{position:absolute;inset:0;opacity:0;cursor:pointer}
 .button-row{display:flex;gap:7px;flex-wrap:wrap}
 .button-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:6px;margin:8px 0 10px}
+.copy-map-btn{
+  grid-column:1/-1;
+  min-height:32px;
+  border-color:#3d536b;
+  color:#cfe6ff;
+  background:#192633;
+}
+.copy-map-btn:hover:not(:disabled){background:#203246}
 button,.ghost,.secondary,.primary{
   border-radius:6px;
   min-height:30px;
