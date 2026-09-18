@@ -1179,13 +1179,29 @@ function setBusy(busy){
   updateButtons();
 }
 
+function resolvableIkChainCount(){
+  if (!state.targetRig || !state.ikChains.length) return 0;
+  const prefix = els.targetPrefix.value || "";
+  let count = 0;
+  for (const chain of state.ikChains){
+    const control = resolveBone(state.targetRig,chain.ik_control || "",prefix);
+    const pole = resolveBone(state.targetRig,chain.pole_control || "",prefix);
+    if (control || pole) count++;
+  }
+  return count;
+}
+
 function updateButtons(){
   const {sourcePrefix,targetPrefix} = currentPrefixes();
   const valid = countValidPairs(state.pairs,state.sourceRig,state.targetRig,sourcePrefix,targetPrefix).valid;
   const customRestReady = !els.useCustomRest.checked
     || (Boolean(state.restPosePreset) && builtInRestPoseCompatible());
   els.applyBtn.disabled = state.busy || !state.sourceRig || !state.targetRig || !state.sourceClip || valid === 0 || !customRestReady;
-  els.convertIkBtn.disabled = state.busy || !state.targetRig || !state.retargetClip || !state.ikChains.length;
+  const ikReady = resolvableIkChainCount();
+  els.convertIkBtn.disabled = state.busy || !state.targetRig || !state.retargetClip || ikReady === 0;
+  els.convertIkBtn.title = ikReady
+    ? `${ikReady} cadena(s) IK resolubles en el Target FBX`
+    : "El Target FBX no contiene controles IK utilizables; el retarget FK/deform sigue funcionando.";
   els.exportGlbBtn.disabled = state.busy || !state.targetRig || !state.retargetClip;
   els.exportClipBtn.disabled = state.busy || !state.retargetClip;
   updateRestPoseControls();
