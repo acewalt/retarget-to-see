@@ -1251,10 +1251,15 @@ function actualPairRecords(pairs,sourceRig,targetRig,sourcePrefix,targetPrefix){
       continue;
     }
 
-    const targetBone = raw.set_as_root
-      ? (resolveBone(targetRig,raw.target,targetPrefix)
-        || resolveRetargetTargetBone(targetRig,raw.target,targetPrefix))
-      : resolveRetargetTargetBone(targetRig,raw.target,targetPrefix);
+    // Browser/FBX note: CloudRig/ARP controls such as TORSO-Spine are
+    // constraint-driven inside Blender. Those constraints are absent from
+    // FBX, so even a Set-as-Root row must bake onto the resolved deform
+    // proxy that actually moves the mesh.
+    const targetBone = resolveRetargetTargetBone(
+      targetRig,
+      raw.target,
+      targetPrefix
+    );
     if (!targetBone) continue;
     out.push({
       ...raw,
@@ -1448,39 +1453,70 @@ export async function bakeRetarget(options){
         applyAxesAdd(localPos,contribution,axesFor(r));
       }
 
-      // The first rotation row for a target owns its rotation.
-      const rotRec = recs.find(pairHasRotation);
+      const rotRecs = recs.filter(pairHasRotation);
       let desiredWorldQ = null;
-      let directLocalRootQ = null;
-      if (rotRec){
-        const srcRest = sourceRest.get(rotRec.sourceBone.name);
-        const motionScale = pairMotionScale(rotRec,faceSettings) * Number(rotRec.influence ?? 1);
+      let composedLocalQ = null;
 
-        if (rotRec.set_as_root){
-          // Auto-Rig Pro "Set as Root": translation + rotation. Use the
-          // source LOCAL rotation delta so parent motion (Mixamo Hips) is
-          // not counted twice when Spine is the designated root mapping.
-          const deltaLocalQ = quatScaledDelta(
+      if (rotRecs.length === 1 && !rotRecs[0].set_as_root){
+        // Normal one-to-one mapping: keep BlendCap's world-space
+        // delta-from-rest transfer.
+        const rotRec = rotRecs[0];
+        const srcRest = sourceRest.get(rotRec.sourceBone.name);
+        const srcPoseQ = new THREE.Quaternion();
+        rotRec.sourceBone.matrixWorld.decompose(
+          new THREE.Vector3(),
+          srcPoseQ,
+          new THREE.Vector3()
+        );
+        const motionScale = pairMotionScale(rotRec,faceSettings)
+          * Number(rotRec.influence ?? 1);
+        const deltaQ = quatScaledDelta(
+          srcPoseQ,
+          srcRest.worldQuaternion,
+          motionScale
+        );
+        desiredWorldQ = deltaQ
+          .multiply(rest.worldQuaternion.clone())
+          .normalize();
+      } else if (rotRecs.length){
+        // FBX control rigs can collapse several Blender controls onto one
+        // weighted deform proxy. Example from this CloudRig:
+        //   Hips  -> HIP-Spine   -> DEF-Hips
+        //   Spine -> TORSO-Spine -> DEF-Hips (Set as Root)
+        // Previously only the FIRST row was used, so Spine/TORSO rotation
+        // was silently discarded. Compose the source LOCAL deltas instead.
+        let combinedDelta = new THREE.Quaternion(); // identity
+        for (const rotRec of rotRecs){
+          const srcRest = sourceRest.get(rotRec.sourceBone.name);
+          if (!srcRest) continue;
+          const motionScale = pairMotionScale(rotRec,faceSettings)
+            * Number(rotRec.influence ?? 1);
+          const deltaLocal = quatScaledDelta(
             rotRec.sourceBone.quaternion,
             srcRest.quaternion,
             motionScale
           );
-          directLocalRootQ = deltaLocalQ.multiply(rest.quaternion.clone()).normalize();
-        } else {
-          const srcPoseQ = new THREE.Quaternion();
-          rotRec.sourceBone.matrixWorld.decompose(new THREE.Vector3(),srcPoseQ,new THREE.Vector3());
-          const deltaQ = quatScaledDelta(srcPoseQ,srcRest.worldQuaternion,motionScale);
-          desiredWorldQ = deltaQ.multiply(rest.worldQuaternion.clone()).normalize();
+          combinedDelta.multiply(deltaLocal).normalize();
         }
+        composedLocalQ = combinedDelta
+          .multiply(rest.quaternion.clone())
+          .normalize();
       }
 
       const parentWorld = parentWorldForBone(bone,worldOut,rest);
-      if (directLocalRootQ){
-        localQuat = directLocalRootQ;
+      if (composedLocalQ){
+        localQuat = composedLocalQ;
       } else if (desiredWorldQ){
         const parentQ = new THREE.Quaternion();
-        parentWorld.decompose(new THREE.Vector3(),parentQ,new THREE.Vector3());
-        localQuat = parentQ.invert().multiply(desiredWorldQ).normalize();
+        parentWorld.decompose(
+          new THREE.Vector3(),
+          parentQ,
+          new THREE.Vector3()
+        );
+        localQuat = parentQ
+          .invert()
+          .multiply(desiredWorldQ)
+          .normalize();
       }
 
       localState.set(bone.name,{position:localPos,quaternion:localQuat,scale:localScale});
@@ -1579,6 +1615,12 @@ export async function bakeRetarget(options){
     locationScaleMethod:scaleInfo.method,
     locationScaleSamples:scaleInfo.samples,
     rootMotionChannels:rootLocationRecords.length,
+    collapsedRotationTargets:[...targetByActual.entries()]
+      .filter(([,recs]) => recs.filter(pairHasRotation).length > 1)
+      .map(([name,recs]) => ({
+        target:name,
+        sources:recs.filter(pairHasRotation).map(r => r.source)
+      })),
     faceScale
   };
 }
