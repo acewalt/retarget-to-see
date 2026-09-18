@@ -574,9 +574,6 @@ export function captureRestPosePreset(sourceRig,{
       rest:quaternionToWXYZ(restD.quaternion),
       pose:quaternionToWXYZ(poseD.quaternion)
     };
-    if (includeLocScale){
-      entry.loc: undefined;
-    }
     entry.loc = [poseD.position.x,poseD.position.y,poseD.position.z];
     entry.scale = [poseD.scale.x,poseD.scale.y,poseD.scale.z];
     bones[stripKnownPrefix(bone.name,"")] = entry;
