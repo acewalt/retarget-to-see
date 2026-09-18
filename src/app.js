@@ -15,6 +15,8 @@ import {
   guessPrefix,
   bakeRetarget,
   bakeIkIntoClip,
+  previewRestPosePreset,
+  captureRestPosePreset,
   serializeMap
 } from "./retarget-engine.js";
 
@@ -48,6 +50,12 @@ const els = {
   targetBoneList:$("targetBoneList"),
   autoScale:$("autoScale"),
   useCurrentRest:$("useCurrentRest"),
+  useCustomRest:$("useCustomRest"),
+  restPoseSelect:$("restPoseSelect"),
+  restPoseFile:$("restPoseFile"),
+  previewRestBtn:$("previewRestBtn"),
+  saveRestBtn:$("saveRestBtn"),
+  includeRestLocScale:$("includeRestLocScale"),
   autoBakeIk:$("autoBakeIk"),
   useWorldLocation:$("useWorldLocation"),
   headSource:$("headSource"),
@@ -83,6 +91,9 @@ const state = {
   preset:null,
   presetManifest:[],
   customPresets:[],
+  restPoseManifest:[],
+  customRestPoses:[],
+  restPosePreset:null,
   currentTime:0,
   playing:false,
   lastTick:performance.now(),
