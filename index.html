@@ -154,6 +154,32 @@
           <input id="useCurrentRest" type="checkbox" />
           <span>Use Current Source Pose as Rest</span>
         </label>
+
+        <div class="rest-pose-block">
+          <label class="check-row">
+            <input id="useCustomRest" type="checkbox" />
+            <span>Use Custom Rest Pose</span>
+          </label>
+          <label class="field">
+            <span>Preset de rest pose</span>
+            <select id="restPoseSelect" disabled>
+              <option value="">— Sin preset —</option>
+            </select>
+          </label>
+          <div class="button-row">
+            <button id="previewRestBtn" class="ghost small" type="button" disabled>Preview Selected Pose</button>
+            <button id="saveRestBtn" class="ghost small" type="button" disabled>Save Current Pose as Preset</button>
+            <label class="ghost small file-inline">
+              Importar Pose JSON
+              <input id="restPoseFile" type="file" accept=".json,application/json" />
+            </label>
+          </div>
+          <label class="check-row">
+            <input id="includeRestLocScale" type="checkbox" disabled />
+            <span>Include Location &amp; Scale in Rest Pose</span>
+          </label>
+        </div>
+
         <label class="check-row">
           <input id="autoBakeIk" type="checkbox" />
           <span>Auto-bake IK on Apply</span>
