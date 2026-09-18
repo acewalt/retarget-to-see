@@ -242,6 +242,16 @@ button:disabled{opacity:.42;cursor:not-allowed}
   color:#dce1e7;
 }
 .check-row input{width:15px;height:15px}
+.rest-pose-block{
+  margin:7px 0 9px;
+  padding:8px;
+  border:1px solid var(--line-soft);
+  border-radius:7px;
+  background:#16191d;
+}
+.rest-pose-block .field{margin:3px 0 7px}
+.rest-pose-block .button-row{margin-bottom:4px}
+.rest-pose-block .check-row:last-child{margin-top:3px;color:#c9d0d8}
 .advanced{
   margin-top:8px;
   border:1px solid var(--line-soft);
