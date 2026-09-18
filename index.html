@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#17191d" />
+  <title>Retarget to See</title>
+  <link rel="stylesheet" href="./styles.css" />
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>Retarget to See</h1>
+      <p>FBX → mapeo de huesos → retargeting en el navegador</p>
+    </div>
+    <div class="topbar-actions">
+      <span class="badge">LOCAL · sin subida</span>
+      <a href="https://github.com/acewalt/retarget-to-see" target="_blank" rel="noreferrer">GitHub</a>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="workspace">
+      <div class="view-grid">
+        <article class="viewport-card">
+          <div class="viewport-head">
+            <div>
+              <strong>Source</strong>
+              <span id="sourceMeta">Sin FBX</span>
+            </div>
+            <button class="ghost small" id="frameSourceBtn" type="button">Encuadrar</button>
+          </div>
+          <div class="viewport" id="sourceViewport">
+            <div class="drop-hint" id="sourceDropHint">Arrastra aquí el FBX con la animación</div>
+          </div>
+        </article>
+
+        <article class="viewport-card">
+          <div class="viewport-head">
+            <div>
+              <strong>Target</strong>
+              <span id="targetMeta">Sin FBX</span>
+            </div>
+            <button class="ghost small" id="frameTargetBtn" type="button">Encuadrar</button>
+          </div>
+          <div class="viewport" id="targetViewport">
+            <div class="drop-hint" id="targetDropHint">Arrastra aquí el FBX del personaje destino</div>
+          </div>
+        </article>
+      </div>
+
+      <div class="transport">
+        <button id="playBtn" type="button" class="icon-btn" title="Play / Pause">▶</button>
+        <span id="timeLabel">0.00 / 0.00 s</span>
+        <input id="timeline" type="range" min="0" max="1" step="0.001" value="0" />
+        <label>FPS
+          <input id="fpsInput" class="number" type="number" min="12" max="120" step="1" value="30" />
+        </label>
+      </div>
+    </section>
+
+    <aside class="panel">
+      <section class="panel-section">
+        <h2>1. Cargar rigs</h2>
+        <div class="file-row">
+          <label class="file-btn">
+            Source FBX
+            <input id="sourceFile" type="file" accept=".fbx,application/octet-stream" />
+          </label>
+          <label class="file-btn">
+            Target FBX
+            <input id="targetFile" type="file" accept=".fbx,application/octet-stream" />
+          </label>
+        </div>
+        <label class="field">
+          <span>Action / clip del Source</span>
+          <select id="sourceClipSelect" disabled>
+            <option value="">Carga un Source</option>
+          </select>
+        </label>
+      </section>
+
+      <section class="panel-section">
+        <h2>2. Preset y prefijos</h2>
+        <label class="field">
+          <span>Preset</span>
+          <select id="presetSelect">
+            <option value="">— Sin preset —</option>
+          </select>
+        </label>
+        <div class="two-cols">
+          <label class="field">
+            <span>Source Prefix</span>
+            <input id="sourcePrefix" type="text" placeholder="mixamorig:" />
+          </label>
+          <label class="field">
+            <span>Target Prefix</span>
+            <input id="targetPrefix" type="text" placeholder="rig:" />
+          </label>
+        </div>
+        <div class="button-row">
+          <button id="reloadPresetBtn" class="ghost" type="button">Recargar preset</button>
+          <button id="savePresetBtn" class="ghost" type="button">Guardar mapa</button>
+          <label class="ghost file-inline">
+            Importar JSON
+            <input id="presetFile" type="file" accept=".json,application/json" />
+          </label>
+        </div>
+      </section>
+
+      <section class="panel-section mapping-section">
+        <div class="section-title-row">
+          <h2>3. Bone Map</h2>
+          <span id="validCount" class="valid-count">0 / 0 válidos</span>
+        </div>
+        <input id="mapSearch" class="search" type="search" placeholder="Buscar source o target…" />
+        <div class="button-grid">
+          <button id="addPairBtn" class="ghost" type="button">+ Par</button>
+          <button id="addAllBtn" class="ghost" type="button">Add All</button>
+          <button id="autoMatchBtn" class="ghost" type="button">Auto-Match</button>
+          <button id="sortBtn" class="ghost" type="button">A-Z</button>
+          <button id="clearMapBtn" class="ghost danger" type="button">Clear</button>
+        </div>
+
+        <div class="map-header">
+          <span>Source</span>
+          <span>Target</span>
+          <span>Canal</span>
+          <span>Anchor</span>
+          <span></span>
+        </div>
+        <div id="mappingRows" class="mapping-rows">
+          <div class="empty-state">Carga ambos FBX o selecciona un preset.</div>
+        </div>
+        <datalist id="sourceBoneList"></datalist>
+        <datalist id="targetBoneList"></datalist>
+      </section>
+
+      <section class="panel-section">
+        <h2>4. Retargeting</h2>
+        <label class="check-row">
+          <input id="autoScale" type="checkbox" checked />
+          <span>Auto-scale to Target</span>
+        </label>
+        <label class="check-row">
+          <input id="useCurrentRest" type="checkbox" />
+          <span>Use Current Source Pose as Rest</span>
+        </label>
+        <label class="check-row">
+          <input id="autoBakeIk" type="checkbox" />
+          <span>Auto-bake IK on Apply</span>
+        </label>
+
+        <details class="advanced">
+          <summary>Advanced</summary>
+          <label class="check-row">
+            <input id="useWorldLocation" type="checkbox" />
+            <span>Read Source Location in World Space</span>
+          </label>
+
+          <div class="two-cols">
+            <label class="field">
+              <span>Head (Source)</span>
+              <input id="headSource" type="text" list="sourceBoneList" placeholder="Head" />
+            </label>
+            <label class="field">
+              <span>Head (Target)</span>
+              <input id="headTarget" type="text" list="targetBoneList" placeholder="head" />
+            </label>
+          </div>
+
+          <div class="subsection">
+            <h3>Face Expression</h3>
+            <label class="check-row">
+              <input id="facePerRegion" type="checkbox" />
+              <span>Use Per-Region</span>
+            </label>
+            <label class="field compact">
+              <span>Strength</span>
+              <input id="faceGlobal" type="number" min="-4" max="4" step="0.05" value="1" />
+            </label>
+            <div id="faceRegions" class="face-regions"></div>
+          </div>
+
+          <div class="subsection">
+            <div class="section-title-row">
+              <h3>FK → IK Mapping</h3>
+              <button id="addIkChainBtn" class="ghost small" type="button">+ cadena</button>
+            </div>
+            <div id="ikRows" class="ik-rows">
+              <div class="empty-state">El preset puede llenar estas cadenas.</div>
+            </div>
+          </div>
+        </details>
+
+        <button id="applyBtn" class="primary big" type="button" disabled>Aplicar Retargeting</button>
+        <button id="convertIkBtn" class="secondary big" type="button" disabled>Convert FK → IK</button>
+      </section>
+
+      <section class="panel-section">
+        <h2>5. Salida</h2>
+        <div class="button-row">
+          <button id="exportGlbBtn" class="secondary" type="button" disabled>Descargar GLB</button>
+          <button id="exportClipBtn" class="ghost" type="button" disabled>Animación JSON</button>
+        </div>
+        <div class="progress-wrap" id="progressWrap" hidden>
+          <div class="progress-track"><div id="progressBar"></div></div>
+          <span id="progressText">0%</span>
+        </div>
+        <div id="status" class="status">Listo. Carga Source y Target.</div>
+      </section>
+
+      <section class="notice">
+        <strong>FBX y rigs de Blender</strong>
+        <p>Rigify/ARP/CloudRig dependen de constraints y drivers que FBX normalmente no conserva. Esta web retargetea los huesos que sí existen en el FBX; si un preset apunta a controles ausentes, esas filas quedan inválidas y no se hornean.</p>
+      </section>
+    </aside>
+  </main>
+
+  <footer>
+    Port web del retargeting inspirado en <a href="https://github.com/Arcomade/BlendCap" target="_blank" rel="noreferrer">BlendCap</a> · GPL-3.0 · sin garantía.
+  </footer>
+
+  <script type="module" src="./src/app.js"></script>
+</body>
+</html>
