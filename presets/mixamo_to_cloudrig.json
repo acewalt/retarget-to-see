@@ -4,7 +4,7 @@
   "target_kind": "generic",
   "namespace_strip": "",
   "auto_bake_ik": false,
-  "_note": "Web/FBX CloudRig mapping. Mixamo Hips rotation drives TORSO-Spine (the torso/master orientation control), while Hips translation remains split as CloudRig expects: vertical motion through TORSO-Spine and planar motion through root. In the web engine both translation rows are baked as global Target root motion because Blender constraints are not present in FBX. Spine/Spine1 continue to drive FK-Spine/FK-Chest. NO FACE: Mixamo carries no face capture.",
+  "_note": "Mixamo → CloudRig FK web preset aligned to the user's known-working Auto-Rig Pro .bmap. Torso chain: Hips→HIP-Spine (rotation), Spine→TORSO-Spine (Set as Root = translation + rotation), Spine1→FK-Spine, Spine2→FK-Chest. Fingers remain mapped where available; the web engine can fall back to deform bones when Blender constraints are absent.",
   "ik_chains": [
     {
       "limb_kind": "ARM",
@@ -277,36 +277,30 @@
       "influence": 1
     },
     {
-      "source": "Spine1",
-      "target": "FK-Chest",
+      "source": "Hips",
+      "target": "HIP-Spine",
       "channels": "ROT",
       "influence": 1
     },
     {
       "source": "Spine",
+      "target": "TORSO-Spine",
+      "channels": "LOC_ROT",
+      "influence": 1,
+      "axes": "XYZ",
+      "set_as_root": true
+    },
+    {
+      "source": "Spine1",
       "target": "FK-Spine",
       "channels": "ROT",
       "influence": 1
     },
     {
-      "source": "Hips",
-      "target": "TORSO-Spine",
+      "source": "Spine2",
+      "target": "FK-Chest",
       "channels": "ROT",
       "influence": 1
-    },
-    {
-      "source": "Hips",
-      "target": "TORSO-Spine",
-      "channels": "LOC",
-      "influence": 1,
-      "axes": "Z"
-    },
-    {
-      "source": "Hips",
-      "target": "root",
-      "channels": "LOC",
-      "influence": 1,
-      "axes": "XY"
     },
     {
       "source": "LeftUpLeg",
