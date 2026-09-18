@@ -327,6 +327,9 @@ function anatomicalBoneKey(name=""){
   n = n
     .replace(/^(def|org|mch|fk|ik|ctrl|control|bone)+/,"")
     .replace(/^c(?=[a-z])/,"")
+    // CloudRig commonly exports DEF-f_index.01.L style names while the
+    // preset uses FK-Finger_Index1.L. Normalize both dialects.
+    .replace(/^f(?=(thumb|index|middle|ring|pinky|little))/,"")
     .replace(/finger/g,"")
     .replace(/left/g,"l")
     .replace(/right/g,"r")
@@ -339,7 +342,8 @@ function anatomicalBoneKey(name=""){
     .replace(/toebase/g,"toe")
     .replace(/toes/g,"toe")
     .replace(/pinky/g,"little")
-    .replace(/clavicle/g,"shoulder");
+    .replace(/clavicle/g,"shoulder")
+    .replace(/(thumb|index|middle|ring|little)0+([1-9])/g,"$1$2");
 
   // CloudRig locomotion/control names. In an FBX without Blender
   // constraints these controls cannot drive the skinned skeleton, so map
@@ -347,6 +351,45 @@ function anatomicalBoneKey(name=""){
   if (n === "root" || n === "hipspine" || n === "torsospine") return "hips";
 
   return n;
+}
+
+function fingerDescriptor(name=""){
+  let key = anatomicalBoneKey(name);
+  if (!key) return null;
+
+  const sideMatch = key.match(/([lr])$/);
+  const side = sideMatch ? sideMatch[1] : "";
+  if (side) key = key.slice(0,-1);
+
+  const familyMatch = key.match(/(thumb|index|middle|ring|little)/);
+  if (!familyMatch) return null;
+  const family = familyMatch[1];
+
+  const digitMatch = key.match(/(?:thumb|index|middle|ring|little)(\d+)/);
+  if (!digitMatch) return null;
+  const segment = Number(digitMatch[1]);
+  if (!Number.isFinite(segment)) return null;
+
+  return {family,segment,side};
+}
+
+function findFingerDeformBone(rig,name){
+  if (!rig?.skinBoneNames?.size) return null;
+  const wanted = fingerDescriptor(name);
+  if (!wanted) return null;
+
+  const candidates = [];
+  for (const bone of rig.bones){
+    if (!rig.skinBoneNames.has(bone.name)) continue;
+    const got = fingerDescriptor(bone.name);
+    if (!got) continue;
+    if (got.family !== wanted.family) continue;
+    if (got.segment !== wanted.segment) continue;
+    if (wanted.side && got.side && got.side !== wanted.side) continue;
+    candidates.push(bone);
+  }
+
+  return candidates.length === 1 ? candidates[0] : null;
 }
 
 function skinBoneCandidates(rig,key){
@@ -375,6 +418,11 @@ export function resolveRetargetTargetBone(rig,shortName="",prefix=""){
   const key = anatomicalBoneKey(shortName);
   let candidates = skinBoneCandidates(rig,key);
   if (candidates.length === 1) return candidates[0];
+
+  // Finger naming differs heavily between Blender rigs and FBX exports
+  // (Finger_Index1 vs f_index.01, Thumb2 vs thumb.02, etc.).
+  const finger = findFingerDeformBone(rig,shortName);
+  if (finger) return finger;
 
   // A few rigs use pelvis rather than hips.
   if (key === "hips"){
