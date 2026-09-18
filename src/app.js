@@ -1062,6 +1062,68 @@ els.presetFile.addEventListener("change",async () => {
   els.presetFile.value = "";
 });
 
+els.useCurrentRest.addEventListener("change",() => {
+  if (els.useCurrentRest.checked) els.useCustomRest.checked = false;
+  updateRestPoseControls();
+  updateButtons();
+});
+els.useCustomRest.addEventListener("change",async () => {
+  if (els.useCustomRest.checked){
+    els.useCurrentRest.checked = false;
+    if (!els.restPoseSelect.value){
+      const first = [...els.restPoseSelect.options].find(o => o.value);
+      if (first) els.restPoseSelect.value = first.value;
+    }
+    if (els.restPoseSelect.value && !state.restPosePreset){
+      try{ await loadSelectedRestPose(); }
+      catch(err){ setStatus(err.message || String(err),"error"); }
+    }
+  }
+  updateRestPoseControls();
+  updateButtons();
+});
+els.restPoseSelect.addEventListener("change",async () => {
+  try{
+    await loadSelectedRestPose();
+    if (state.restPosePreset){
+      setStatus(`Rest pose seleccionado: ${state.restPosePreset.name || "preset"}.`,"success");
+    }
+  }catch(err){
+    console.error(err);
+    setStatus(err.message || String(err),"error");
+  }
+});
+els.previewRestBtn.addEventListener("click",previewSelectedRestPose);
+els.saveRestBtn.addEventListener("click",saveCurrentRestPose);
+els.restPoseFile.addEventListener("change",async () => {
+  const file = els.restPoseFile.files[0];
+  if (!file) return;
+  try{
+    const data = JSON.parse(await file.text());
+    if (!data || typeof data.bones !== "object"){
+      throw new Error("El JSON no contiene un bloque bones de rest pose.");
+    }
+    data.name ||= file.name.replace(/\.json$/i,"");
+    state.customRestPoses.push(data);
+    persistCustomRestPoses();
+    renderRestPoseSelect();
+    els.restPoseSelect.value = `custom:${state.customRestPoses.length-1}`;
+    state.restPosePreset = data;
+    els.useCustomRest.checked = true;
+    els.useCurrentRest.checked = false;
+    els.includeRestLocScale.checked = data.include_loc_scale === undefined
+      ? true
+      : Boolean(data.include_loc_scale);
+    updateRestPoseControls();
+    updateButtons();
+    setStatus(`Rest pose importado: ${data.name}.`,"success");
+  }catch(err){
+    console.error(err);
+    setStatus(`Rest pose JSON inválido: ${err.message || err}`,"error");
+  }
+  els.restPoseFile.value = "";
+});
+
 els.sourcePrefix.addEventListener("input",() => { renderMappings();updateValidCount(); });
 els.targetPrefix.addEventListener("input",() => { renderMappings();updateValidCount(); });
 els.mapSearch.addEventListener("input",renderMappings);
@@ -1126,4 +1188,5 @@ renderMappings();
 updateTransport();
 updateButtons();
 loadPresetManifest();
+loadRestPoseManifest();
 requestAnimationFrame(animate);
