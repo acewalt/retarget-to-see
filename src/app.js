@@ -182,7 +182,7 @@ class RigViewport{
   }
   render(){
     this.controls.update();
-    if (this.helper) this.helper.update();
+    if (this.helper) this.helper.updateMatrixWorld(true);
     this.renderer.render(this.scene,this.camera);
   }
 }
