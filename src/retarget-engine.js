@@ -375,6 +375,7 @@ function anatomicalBoneKey(name=""){
     .replace(/toes/g,"toe")
     .replace(/pinky/g,"little")
     .replace(/clavicle/g,"shoulder")
+    .replace(/spine0+([1-9])/g,"spine$1")
     .replace(/(thumb|index|middle|ring|little)0+([1-9])/g,"$1$2");
 
   // CloudRig locomotion/control names. In an FBX without Blender
@@ -475,29 +476,67 @@ export function resolveRetargetTargetBone(rig,shortName="",prefix=""){
     ];
     const unique = [...new Set(candidates)];
     if (unique.length === 1) return unique[0];
+
+    // CloudRig/Sintel often uses the lowest DEF-spine as the pelvis/root
+    // deform bone rather than a bone literally named hips/pelvis.
+    const weightedSpine = rig.bones
+      .filter(b => deformNames.has(b.name) && anatomicalBoneKey(b.name).startsWith("spine"))
+      .sort((a,b) => (rig.rest.get(a.name)?.depth ?? 0) - (rig.rest.get(b.name)?.depth ?? 0));
+    if (weightedSpine.length) return weightedSpine[0];
   }
 
-  // Spine/chest naming frequently uses numbered deform bones. Use a
-  // conservative token match only when there is a unique skinned result.
-  const side = /(?:^|[^a-z])(l|r)$/.exec(key)?.[1] || "";
-  const tokens = [];
-  if (key.includes("chest")) tokens.push("chest","spine2","spine3");
-  else if (key === "spine" || key.startsWith("spine")) tokens.push("spine","spine1");
-  else if (key.includes("shoulder")) tokens.push("shoulder","clavicle");
+  // Spine/chest naming frequently uses numbered deform bones.
+  const side = /([lr])$/.exec(key)?.[1] || "";
+  if (key.includes("chest")){
+    const spineBones = rig.bones
+      .filter(b => {
+        if (!deformNames.has(b.name)) return false;
+        const k = anatomicalBoneKey(b.name);
+        return k.includes("chest") || k.startsWith("spine");
+      })
+      .sort((a,b) => (rig.rest.get(a.name)?.depth ?? 0) - (rig.rest.get(b.name)?.depth ?? 0));
+    // Chest is the uppermost/deepest torso deform before neck/head.
+    if (spineBones.length) return spineBones[spineBones.length - 1];
+  }
 
-  if (tokens.length){
+  if (key === "spine" || key.startsWith("spine")){
+    const exactish = rig.bones
+      .filter(b => {
+        if (!deformNames.has(b.name)) return false;
+        const k = anatomicalBoneKey(b.name);
+        return k === key;
+      });
+    if (exactish.length === 1) return exactish[0];
+
+    const spineBones = rig.bones
+      .filter(b => deformNames.has(b.name) && anatomicalBoneKey(b.name).startsWith("spine"))
+      .sort((a,b) => (rig.rest.get(a.name)?.depth ?? 0) - (rig.rest.get(b.name)?.depth ?? 0));
+    if (spineBones.length){
+      // FK-Spine means the lower torso; numbered spine targets retain their
+      // numeric index where possible.
+      const idx = Number((key.match(/spine(\d+)/) || [])[1]);
+      if (Number.isFinite(idx)){
+        const byIndex = spineBones.find(b => anatomicalBoneKey(b.name) === `spine${idx}`);
+        if (byIndex) return byIndex;
+      }
+      return spineBones[0];
+    }
+  }
+
+  if (key.includes("shoulder")){
     const fuzzy = rig.bones.filter(b => {
       if (!deformNames.has(b.name)) return false;
       const k = anatomicalBoneKey(b.name);
       if (side && !k.endsWith(side)) return false;
-      return tokens.some(t => k.includes(t));
+      return k.includes("shoulder");
     });
     if (fuzzy.length === 1) return fuzzy[0];
   }
 
-  // If no deform equivalent is identifiable, keep the direct mapped bone.
-  // This preserves support for FBXs whose controls are intentionally usable.
-  return direct;
+  // If a direct control exists but has zero vertex influence, returning it
+  // would create a "successful" bake that never moves the visible mesh.
+  // Mark it unresolved instead.
+  return null;
 }
 
 export function countValidPairs(pairs, sourceRig, targetRig, sourcePrefix="", targetPrefix=""){
