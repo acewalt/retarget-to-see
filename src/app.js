@@ -1,0 +1,971 @@
+import * as THREE from "three";
+import { FBXLoader } from "three/addons/loaders/FBXLoader.js";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { GLTFExporter } from "three/addons/exporters/GLTFExporter.js";
+import {
+  FACE_REGIONS,
+  createRigState,
+  resetRigToRest,
+  activateClip,
+  setRigTime,
+  resolveBone,
+  countValidPairs,
+  autoMatchPairs,
+  stripKnownPrefix,
+  guessPrefix,
+  bakeRetarget,
+  bakeIkIntoClip,
+  serializeMap
+} from "./retarget-engine.js";
+
+const $ = id => document.getElementById(id);
+
+const els = {
+  sourceViewport:$("sourceViewport"),
+  targetViewport:$("targetViewport"),
+  sourceDropHint:$("sourceDropHint"),
+  targetDropHint:$("targetDropHint"),
+  sourceMeta:$("sourceMeta"),
+  targetMeta:$("targetMeta"),
+  sourceFile:$("sourceFile"),
+  targetFile:$("targetFile"),
+  sourceClipSelect:$("sourceClipSelect"),
+  presetSelect:$("presetSelect"),
+  presetFile:$("presetFile"),
+  sourcePrefix:$("sourcePrefix"),
+  targetPrefix:$("targetPrefix"),
+  reloadPresetBtn:$("reloadPresetBtn"),
+  savePresetBtn:$("savePresetBtn"),
+  validCount:$("validCount"),
+  mapSearch:$("mapSearch"),
+  addPairBtn:$("addPairBtn"),
+  addAllBtn:$("addAllBtn"),
+  autoMatchBtn:$("autoMatchBtn"),
+  sortBtn:$("sortBtn"),
+  clearMapBtn:$("clearMapBtn"),
+  mappingRows:$("mappingRows"),
+  sourceBoneList:$("sourceBoneList"),
+  targetBoneList:$("targetBoneList"),
+  autoScale:$("autoScale"),
+  useCurrentRest:$("useCurrentRest"),
+  autoBakeIk:$("autoBakeIk"),
+  useWorldLocation:$("useWorldLocation"),
+  headSource:$("headSource"),
+  headTarget:$("headTarget"),
+  facePerRegion:$("facePerRegion"),
+  faceGlobal:$("faceGlobal"),
+  faceRegions:$("faceRegions"),
+  addIkChainBtn:$("addIkChainBtn"),
+  ikRows:$("ikRows"),
+  applyBtn:$("applyBtn"),
+  convertIkBtn:$("convertIkBtn"),
+  exportGlbBtn:$("exportGlbBtn"),
+  exportClipBtn:$("exportClipBtn"),
+  progressWrap:$("progressWrap"),
+  progressBar:$("progressBar"),
+  progressText:$("progressText"),
+  status:$("status"),
+  playBtn:$("playBtn"),
+  timeline:$("timeline"),
+  timeLabel:$("timeLabel"),
+  fpsInput:$("fpsInput"),
+  frameSourceBtn:$("frameSourceBtn"),
+  frameTargetBtn:$("frameTargetBtn")
+};
+
+const state = {
+  sourceRig:null,
+  targetRig:null,
+  sourceClip:null,
+  retargetClip:null,
+  pairs:[],
+  ikChains:[],
+  preset:null,
+  presetManifest:[],
+  customPresets:[],
+  currentTime:0,
+  playing:false,
+  lastTick:performance.now(),
+  busy:false,
+  faceRegions:Object.fromEntries(FACE_REGIONS.map(r => [r,1]))
+};
+
+class RigViewport{
+  constructor(container){
+    this.container = container;
+    this.scene = new THREE.Scene();
+    this.scene.background = new THREE.Color(0x101318);
+    this.camera = new THREE.PerspectiveCamera(40,1,0.01,100000);
+    this.camera.position.set(2.8,1.8,3.8);
+    this.renderer = new THREE.WebGLRenderer({antialias:true,alpha:false,powerPreference:"high-performance"});
+    this.renderer.setPixelRatio(Math.min(devicePixelRatio || 1,2));
+    this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+    this.container.appendChild(this.renderer.domElement);
+    this.controls = new OrbitControls(this.camera,this.renderer.domElement);
+    this.controls.enableDamping = true;
+    this.controls.dampingFactor = .08;
+    this.controls.target.set(0,1,0);
+
+    const hemi = new THREE.HemisphereLight(0xffffff,0x28313b,2.5);
+    this.scene.add(hemi);
+    const dir = new THREE.DirectionalLight(0xffffff,2.2);
+    dir.position.set(3,5,4);
+    this.scene.add(dir);
+
+    this.grid = new THREE.GridHelper(20,40,0x3b4652,0x242a31);
+    this.grid.material.transparent = true;
+    this.grid.material.opacity = .45;
+    this.scene.add(this.grid);
+
+    this.root = null;
+    this.helper = null;
+    this.rig = null;
+
+    this.resizeObserver = new ResizeObserver(() => this.resize());
+    this.resizeObserver.observe(container);
+    this.resize();
+  }
+  resize(){
+    const w = Math.max(1,this.container.clientWidth);
+    const h = Math.max(1,this.container.clientHeight);
+    this.renderer.setSize(w,h,false);
+    this.camera.aspect = w/h;
+    this.camera.updateProjectionMatrix();
+  }
+  setRig(rig){
+    if (this.root) this.scene.remove(this.root);
+    if (this.helper) this.scene.remove(this.helper);
+    this.rig = rig;
+    this.root = rig?.root || null;
+    if (this.root){
+      this.scene.add(this.root);
+      this.helper = new THREE.SkeletonHelper(this.root);
+      this.helper.material.transparent = true;
+      this.helper.material.opacity = .72;
+      this.helper.material.depthTest = false;
+      this.scene.add(this.helper);
+      this.frame();
+    }
+  }
+  frame(){
+    if (!this.rig || !this.rig.bones.length) return;
+    this.rig.root.updateMatrixWorld(true);
+    const box = new THREE.Box3();
+    let initialized = false;
+    const p = new THREE.Vector3();
+    for (const bone of this.rig.bones){
+      p.setFromMatrixPosition(bone.matrixWorld);
+      if (!initialized){
+        box.min.copy(p);box.max.copy(p);initialized=true;
+      } else box.expandByPoint(p);
+    }
+    // Include meshes when present.
+    const objectBox = new THREE.Box3().setFromObject(this.rig.root);
+    if (!objectBox.isEmpty()){
+      box.union(objectBox);
+      initialized = true;
+    }
+    if (!initialized) return;
+
+    const center = box.getCenter(new THREE.Vector3());
+    const size = box.getSize(new THREE.Vector3());
+    const radius = Math.max(size.length()*.5,.1);
+    const distance = radius / Math.tan(THREE.MathUtils.degToRad(this.camera.fov*.5)) * 1.25;
+    const direction = new THREE.Vector3(1,.45,1).normalize();
+    this.camera.position.copy(center).addScaledVector(direction,distance);
+    this.camera.near = Math.max(.001,distance/1000);
+    this.camera.far = Math.max(1000,distance*20);
+    this.camera.updateProjectionMatrix();
+    this.controls.target.copy(center);
+    this.controls.update();
+    this.grid.position.y = box.min.y;
+  }
+  render(){
+    this.controls.update();
+    if (this.helper) this.helper.update();
+    this.renderer.render(this.scene,this.camera);
+  }
+}
+
+const sourceView = new RigViewport(els.sourceViewport);
+const targetView = new RigViewport(els.targetViewport);
+
+function setStatus(message,kind=""){
+  els.status.textContent = message;
+  els.status.className = "status" + (kind ? " " + kind : "");
+}
+
+function setProgress(value,text=""){
+  const v = Math.max(0,Math.min(1,value || 0));
+  els.progressWrap.hidden = false;
+  els.progressBar.style.width = `${Math.round(v*100)}%`;
+  els.progressText.textContent = `${Math.round(v*100)}%`;
+  if (text) setStatus(text);
+}
+
+function hideProgress(){
+  els.progressWrap.hidden = true;
+  els.progressBar.style.width = "0%";
+  els.progressText.textContent = "0%";
+}
+
+function downloadBlob(blob,fileName){
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = fileName;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url),1500);
+}
+
+function safeBaseName(name="file"){
+  return name.replace(/\.[^.]+$/,"").replace(/[^a-z0-9_\-]+/gi,"_") || "retargeted";
+}
+
+async function loadFbx(file,kind){
+  if (!file) return;
+  setStatus(`Cargando ${kind}: ${file.name}…`);
+  const buffer = await file.arrayBuffer();
+  const loader = new FBXLoader();
+  let root;
+  try{
+    root = loader.parse(buffer,"");
+  }catch(err){
+    console.error(err);
+    throw new Error(`No pude leer ${file.name} como FBX: ${err.message || err}`);
+  }
+  root.name ||= safeBaseName(file.name);
+  root.updateMatrixWorld(true);
+  const rig = createRigState(root,file.name);
+  if (!rig.bones.length) throw new Error(`${file.name} no contiene huesos FBX detectables.`);
+
+  if (kind === "Source"){
+    state.sourceRig = rig;
+    state.sourceClip = rig.animations[0] || null;
+    sourceView.setRig(rig);
+    els.sourceDropHint.hidden = true;
+    populateSourceClips();
+    if (state.sourceClip) activateClip(rig,state.sourceClip);
+    els.sourceMeta.textContent = `${file.name} · ${rig.bones.length} huesos · ${rig.animations.length} clips`;
+  } else {
+    state.targetRig = rig;
+    state.retargetClip = null;
+    targetView.setRig(rig);
+    els.targetDropHint.hidden = true;
+    els.targetMeta.textContent = `${file.name} · ${rig.bones.length} huesos`;
+    els.exportGlbBtn.disabled = true;
+    els.exportClipBtn.disabled = true;
+    els.convertIkBtn.disabled = true;
+  }
+
+  populateBoneLists();
+  maybeAutodetectPrefixes();
+  updateValidCount();
+  updateTransport();
+  updateButtons();
+  setStatus(`${kind} cargado: ${file.name}.`,"success");
+}
+
+function populateSourceClips(){
+  const select = els.sourceClipSelect;
+  select.innerHTML = "";
+  if (!state.sourceRig?.animations.length){
+    select.disabled = true;
+    const o = new Option("El FBX no contiene animaciones","");
+    select.add(o);
+    state.sourceClip = null;
+    return;
+  }
+  state.sourceRig.animations.forEach((clip,i) => {
+    select.add(new Option(`${clip.name || "Clip " + (i+1)} · ${clip.duration.toFixed(2)} s`,String(i)));
+  });
+  const index = Math.max(0,state.sourceRig.animations.indexOf(state.sourceClip));
+  select.value = String(index);
+  select.disabled = false;
+}
+
+function populateBoneLists(){
+  els.sourceBoneList.innerHTML = "";
+  els.targetBoneList.innerHTML = "";
+  for (const name of state.sourceRig?.boneNames || []){
+    els.sourceBoneList.appendChild(new Option(name));
+  }
+  for (const name of state.targetRig?.boneNames || []){
+    els.targetBoneList.appendChild(new Option(name));
+  }
+}
+
+function currentPrefixes(){
+  return {
+    sourcePrefix:els.sourcePrefix.value || "",
+    targetPrefix:els.targetPrefix.value || ""
+  };
+}
+
+function maybeAutodetectPrefixes(){
+  if (!state.pairs.length) return;
+  const sourceNames = state.pairs.map(p => p.source).filter(Boolean);
+  const targetNames = state.pairs.map(p => p.target).filter(Boolean);
+
+  if (state.sourceRig && (!els.sourcePrefix.value || !sourceNames.some(n => state.sourceRig.boneMap.has(els.sourcePrefix.value+n)))){
+    const guessed = guessPrefix(sourceNames,state.sourceRig.boneNames);
+    if (guessed) els.sourcePrefix.value = guessed;
+  }
+  if (state.targetRig && (!els.targetPrefix.value || !targetNames.some(n => state.targetRig.boneMap.has(els.targetPrefix.value+n)))){
+    const guessed = guessPrefix(targetNames,state.targetRig.boneNames);
+    if (guessed) els.targetPrefix.value = guessed;
+  }
+}
+
+function normalizePair(raw={}){
+  const channels = String(raw.channels || "ROT").toUpperCase();
+  return {
+    source:String(raw.source || ""),
+    target:String(raw.target || ""),
+    channels:["ROT","LOC","LOC_ROT"].includes(channels) ? channels : "ROT",
+    axes:String(raw.axes || "XYZ").toUpperCase(),
+    loc_space:String(raw.loc_space || "BASIS").toUpperCase() === "HEAD_LOCAL" ? "HEAD_LOCAL" : "BASIS",
+    influence:Number.isFinite(Number(raw.influence)) ? Number(raw.influence) : 1,
+    loc_scale:Number.isFinite(Number(raw.loc_scale)) ? Number(raw.loc_scale) : 1,
+    loc_scale_residual:Boolean(raw.loc_scale_residual)
+  };
+}
+
+function updateValidCount(){
+  const {sourcePrefix,targetPrefix} = currentPrefixes();
+  const result = countValidPairs(state.pairs,state.sourceRig,state.targetRig,sourcePrefix,targetPrefix);
+  els.validCount.textContent = `${result.valid} / ${result.total} válidos`;
+  els.validCount.classList.toggle("bad",result.total > 0 && result.valid < result.total);
+  updateButtons();
+}
+
+function makeBoneInput(value,listId,onChange){
+  const input = document.createElement("input");
+  input.type = "text";
+  input.value = value || "";
+  input.setAttribute("list",listId);
+  input.spellcheck = false;
+  input.addEventListener("change",() => onChange(input.value));
+  input.addEventListener("input",() => onChange(input.value,false));
+  return input;
+}
+
+function renderMappings(){
+  const filter = els.mapSearch.value.trim().toLowerCase();
+  els.mappingRows.innerHTML = "";
+
+  const {sourcePrefix,targetPrefix} = currentPrefixes();
+  let visible = 0;
+  state.pairs.forEach((pair,index) => {
+    if (filter && !pair.source.toLowerCase().includes(filter) && !pair.target.toLowerCase().includes(filter)) return;
+    visible++;
+
+    const valid = Boolean(
+      resolveBone(state.sourceRig,pair.source,sourcePrefix)
+      && resolveBone(state.targetRig,pair.target,targetPrefix)
+    );
+    const row = document.createElement("div");
+    row.className = "map-row" + (valid ? "" : " invalid");
+
+    row.appendChild(makeBoneInput(pair.source,"sourceBoneList",(v,commit=true) => {
+      pair.source = v;
+      updateValidCount();
+      if (commit) renderMappings();
+    }));
+    row.appendChild(makeBoneInput(pair.target,"targetBoneList",(v,commit=true) => {
+      pair.target = v;
+      updateValidCount();
+      if (commit) renderMappings();
+    }));
+
+    const channels = document.createElement("select");
+    for (const [value,label] of [["ROT","Rotation"],["LOC","Location"],["LOC_ROT","Loc + Rot"]]){
+      channels.add(new Option(label,value));
+    }
+    channels.value = pair.channels;
+    channels.addEventListener("change",() => {
+      pair.channels = channels.value;
+      renderMappings();
+      updateValidCount();
+    });
+    row.appendChild(channels);
+
+    const anchor = document.createElement("label");
+    anchor.className = "anchor";
+    const anchorInput = document.createElement("input");
+    anchorInput.type = "checkbox";
+    anchorInput.checked = pair.loc_space === "HEAD_LOCAL";
+    anchorInput.disabled = pair.channels === "ROT";
+    anchorInput.title = "Head-local / Anchor";
+    anchorInput.addEventListener("change",() => {
+      pair.loc_space = anchorInput.checked ? "HEAD_LOCAL" : "BASIS";
+    });
+    anchor.appendChild(anchorInput);
+    row.appendChild(anchor);
+
+    const remove = document.createElement("button");
+    remove.className = "remove-btn";
+    remove.textContent = "×";
+    remove.title = "Eliminar par";
+    remove.addEventListener("click",() => {
+      state.pairs.splice(index,1);
+      renderMappings();
+      updateValidCount();
+    });
+    row.appendChild(remove);
+
+    if (pair.channels !== "ROT"){
+      const advanced = document.createElement("div");
+      advanced.className = "axes-row";
+      const axesLabel = document.createElement("span");
+      axesLabel.textContent = "Axes";
+      const axes = document.createElement("select");
+      ["XYZ","XY","XZ","YZ","X","Y","Z"].forEach(a => axes.add(new Option(a,a)));
+      axes.value = pair.axes || "XYZ";
+      axes.addEventListener("change",() => pair.axes = axes.value);
+
+      const scaleLabel = document.createElement("span");
+      scaleLabel.textContent = "Scale";
+      const scale = document.createElement("input");
+      scale.type = "number";
+      scale.step = "0.05";
+      scale.value = String(pair.loc_scale ?? 1);
+      scale.title = "Amplificación por par";
+      scale.addEventListener("change",() => pair.loc_scale = Number(scale.value) || 0);
+
+      advanced.append(axesLabel,axes,scaleLabel,scale);
+      row.appendChild(advanced);
+    }
+
+    els.mappingRows.appendChild(row);
+  });
+
+  if (!visible){
+    const empty = document.createElement("div");
+    empty.className = "empty-state";
+    empty.textContent = state.pairs.length ? "Ningún par coincide con la búsqueda." : "Bone map vacío.";
+    els.mappingRows.appendChild(empty);
+  }
+}
+
+function addAllSourceBones(){
+  if (!state.sourceRig) return;
+  const prefix = els.sourcePrefix.value || "";
+  state.pairs = state.sourceRig.bones.map(b => normalizePair({
+    source:stripKnownPrefix(b.name,prefix),
+    target:"",
+    channels:"ROT"
+  }));
+  renderMappings();
+  updateValidCount();
+}
+
+function autoMatch(){
+  if (!state.sourceRig || !state.targetRig) return;
+  const {sourcePrefix,targetPrefix} = currentPrefixes();
+  const matched = autoMatchPairs(state.sourceRig,state.targetRig,sourcePrefix,targetPrefix);
+  if (!matched.length){
+    setStatus("Auto-Match no encontró nombres equivalentes.","error");
+    return;
+  }
+  state.pairs = matched.map(normalizePair);
+  renderMappings();
+  updateValidCount();
+  setStatus(`Auto-Match creó ${matched.length} pares.`,"success");
+}
+
+function renderFaceRegions(){
+  els.faceRegions.innerHTML = "";
+  for (const region of FACE_REGIONS){
+    const wrap = document.createElement("div");
+    wrap.className = "face-region";
+    const label = document.createElement("label");
+    label.textContent = region;
+    const input = document.createElement("input");
+    input.type = "number";
+    input.min = "-4";
+    input.max = "4";
+    input.step = "0.05";
+    input.value = String(state.faceRegions[region] ?? 1);
+    input.disabled = !els.facePerRegion.checked;
+    input.addEventListener("change",() => {
+      state.faceRegions[region] = Number(input.value);
+    });
+    wrap.append(label,input);
+    els.faceRegions.appendChild(wrap);
+  }
+}
+
+function normalizeIkChain(c={}){
+  return {
+    limb_kind:String(c.limb_kind || c.kind || "ARM").toUpperCase().includes("LEG") ? "LEG" : "ARM",
+    side:String(c.side || "L").toUpperCase().startsWith("R") ? "R" : "L",
+    owner:String(c.owner || ""),
+    ik_control:String(c.ik_control || ""),
+    pole_control:String(c.pole_control || "")
+  };
+}
+
+function renderIkRows(){
+  els.ikRows.innerHTML = "";
+  if (!state.ikChains.length){
+    els.ikRows.innerHTML = '<div class="empty-state">El preset puede llenar estas cadenas.</div>';
+    return;
+  }
+  state.ikChains.forEach((chain,index) => {
+    const row = document.createElement("div");
+    row.className = "ik-row";
+
+    const top = document.createElement("div");
+    top.className = "ik-row-top";
+    const kind = document.createElement("select");
+    kind.add(new Option("Arm","ARM"));
+    kind.add(new Option("Leg","LEG"));
+    kind.value = chain.limb_kind;
+    kind.addEventListener("change",() => chain.limb_kind = kind.value);
+    const side = document.createElement("select");
+    side.add(new Option("L","L"));side.add(new Option("R","R"));
+    side.value = chain.side;
+    side.addEventListener("change",() => chain.side = side.value);
+    const owner = makeBoneInput(chain.owner,"targetBoneList",v => chain.owner = v);
+    owner.placeholder = "IK owner (opcional)";
+    const remove = document.createElement("button");
+    remove.className = "remove-btn";
+    remove.textContent = "×";
+    remove.addEventListener("click",() => {
+      state.ikChains.splice(index,1);
+      renderIkRows();
+    });
+    top.append(kind,side,owner,remove);
+
+    const bottom = document.createElement("div");
+    bottom.className = "ik-row-bottom";
+    const control = makeBoneInput(chain.ik_control,"targetBoneList",v => chain.ik_control = v);
+    control.placeholder = "IK control";
+    const pole = makeBoneInput(chain.pole_control,"targetBoneList",v => chain.pole_control = v);
+    pole.placeholder = "Pole control";
+    bottom.append(control,pole);
+
+    row.append(top,bottom);
+    els.ikRows.appendChild(row);
+  });
+}
+
+function faceSettings(){
+  return {
+    global:Number(els.faceGlobal.value || 1),
+    perRegion:els.facePerRegion.checked,
+    regions:{...state.faceRegions}
+  };
+}
+
+function applyPresetData(data,sourceLabel="Preset"){
+  state.preset = data;
+  state.pairs = (data.pairs || []).map(normalizePair);
+  state.ikChains = (data.ik_chains || []).map(normalizeIkChain);
+
+  els.sourcePrefix.value = data.source_prefix || "";
+  els.targetPrefix.value = data.namespace_strip || "";
+  els.autoBakeIk.checked = Boolean(data.auto_bake_ik);
+  els.useWorldLocation.checked = Boolean(data.use_world_location);
+  els.headSource.value = data.face_head_source || "";
+  els.headTarget.value = data.face_head_target || "";
+
+  const amp = data.face_amplification || {};
+  els.faceGlobal.value = String(Number(amp.global ?? 1));
+  for (const region of FACE_REGIONS){
+    state.faceRegions[region] = Number(amp[region] ?? 1);
+  }
+  els.facePerRegion.checked = Boolean(data.face_capture_compensation)
+    || FACE_REGIONS.some(r => Math.abs((state.faceRegions[r] ?? 1)-1) > 1e-6);
+
+  maybeAutodetectPrefixes();
+  renderMappings();
+  renderIkRows();
+  renderFaceRegions();
+  updateValidCount();
+  setStatus(`${sourceLabel}: ${data.name || "mapa cargado"}.`,"success");
+}
+
+async function loadPresetManifest(){
+  try{
+    const res = await fetch("./presets/index.json",{cache:"no-store"});
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    state.presetManifest = data.presets || [];
+  }catch(err){
+    console.warn("Preset manifest",err);
+    state.presetManifest = [];
+    setStatus("La app abrió, pero no pude leer presets/index.json. El retarget manual sigue disponible.","error");
+  }
+  loadCustomPresets();
+  renderPresetSelect();
+}
+
+function loadCustomPresets(){
+  try{
+    const raw = localStorage.getItem("retarget-to-see.customPresets");
+    state.customPresets = raw ? JSON.parse(raw) : [];
+    if (!Array.isArray(state.customPresets)) state.customPresets = [];
+  }catch{
+    state.customPresets = [];
+  }
+}
+
+function persistCustomPresets(){
+  localStorage.setItem("retarget-to-see.customPresets",JSON.stringify(state.customPresets));
+}
+
+function renderPresetSelect(){
+  const current = els.presetSelect.value;
+  els.presetSelect.innerHTML = '<option value="">— Sin preset —</option>';
+
+  if (state.presetManifest.length){
+    const standard = document.createElement("optgroup");
+    standard.label = "Standard Presets";
+    state.presetManifest.forEach(p => standard.appendChild(new Option(p.name,`builtin:${p.file}`)));
+    els.presetSelect.appendChild(standard);
+  }
+  if (state.customPresets.length){
+    const custom = document.createElement("optgroup");
+    custom.label = "Custom Presets";
+    state.customPresets.forEach((p,i) => custom.appendChild(new Option(p.name || `Custom ${i+1}`,`custom:${i}`)));
+    els.presetSelect.appendChild(custom);
+  }
+  if ([...els.presetSelect.options].some(o => o.value === current)) els.presetSelect.value = current;
+}
+
+async function loadSelectedPreset(){
+  const value = els.presetSelect.value;
+  if (!value) return;
+  if (value.startsWith("builtin:")){
+    const file = value.slice("builtin:".length);
+    const res = await fetch(`./presets/${file}`,{cache:"no-store"});
+    if (!res.ok) throw new Error(`No pude cargar ${file}: HTTP ${res.status}`);
+    applyPresetData(await res.json(),"Preset");
+  } else if (value.startsWith("custom:")){
+    const i = Number(value.slice("custom:".length));
+    const data = state.customPresets[i];
+    if (data) applyPresetData(structuredClone(data),"Custom preset");
+  }
+}
+
+function mapConfig(name=""){
+  const {sourcePrefix,targetPrefix} = currentPrefixes();
+  return {
+    name:name || state.preset?.name || "Custom Web Retarget Map",
+    target_kind:state.preset?.target_kind || "generic",
+    sourcePrefix,targetPrefix,
+    autoBakeIk:els.autoBakeIk.checked,
+    headSource:els.headSource.value,
+    headTarget:els.headTarget.value,
+    useWorldLocation:els.useWorldLocation.checked,
+    faceSettings:faceSettings(),
+    ikChains:state.ikChains,
+    pairs:state.pairs
+  };
+}
+
+function saveCustomPreset(){
+  const name = prompt("Nombre del preset:",state.preset?.name ? `${state.preset.name} Web` : "Mi retarget map");
+  if (!name) return;
+  const data = serializeMap(mapConfig(name));
+  state.customPresets.push(data);
+  persistCustomPresets();
+  renderPresetSelect();
+  els.presetSelect.value = `custom:${state.customPresets.length-1}`;
+  const blob = new Blob([JSON.stringify(data,null,2)],{type:"application/json"});
+  downloadBlob(blob,`${safeBaseName(name)}.json`);
+  setStatus(`Preset "${name}" guardado en el navegador y descargado como JSON.`,"success");
+}
+
+function duration(){
+  return state.sourceClip?.duration || state.retargetClip?.duration || 0;
+}
+
+function updateTransport(){
+  const d = duration();
+  els.timeline.max = String(Math.max(d,0.001));
+  els.timeline.value = String(Math.min(state.currentTime,d));
+  els.timeLabel.textContent = `${state.currentTime.toFixed(2)} / ${d.toFixed(2)} s`;
+  els.playBtn.disabled = !state.sourceClip;
+}
+
+function seek(time){
+  const d = duration();
+  state.currentTime = Math.max(0,Math.min(Number(time) || 0,d));
+  if (state.sourceRig && state.sourceClip){
+    if (state.sourceRig.activeClip !== state.sourceClip) activateClip(state.sourceRig,state.sourceClip);
+    setRigTime(state.sourceRig,state.currentTime);
+  }
+  if (state.targetRig && state.retargetClip){
+    if (state.targetRig.activeClip !== state.retargetClip) activateClip(state.targetRig,state.retargetClip);
+    setRigTime(state.targetRig,state.currentTime);
+  }
+  updateTransport();
+}
+
+function setBusy(busy){
+  state.busy = busy;
+  updateButtons();
+}
+
+function updateButtons(){
+  const {sourcePrefix,targetPrefix} = currentPrefixes();
+  const valid = countValidPairs(state.pairs,state.sourceRig,state.targetRig,sourcePrefix,targetPrefix).valid;
+  els.applyBtn.disabled = state.busy || !state.sourceRig || !state.targetRig || !state.sourceClip || valid === 0;
+  els.convertIkBtn.disabled = state.busy || !state.targetRig || !state.retargetClip || !state.ikChains.length;
+  els.exportGlbBtn.disabled = state.busy || !state.targetRig || !state.retargetClip;
+  els.exportClipBtn.disabled = state.busy || !state.retargetClip;
+}
+
+async function applyRetarget(){
+  if (state.busy) return;
+  state.playing = false;
+  els.playBtn.textContent = "▶";
+  setBusy(true);
+  hideProgress();
+
+  try{
+    const {sourcePrefix,targetPrefix} = currentPrefixes();
+    const restTime = state.currentTime;
+    const result = await bakeRetarget({
+      sourceRig:state.sourceRig,
+      targetRig:state.targetRig,
+      sourceClip:state.sourceClip,
+      pairs:state.pairs,
+      sourcePrefix,targetPrefix,
+      fps:Number(els.fpsInput.value) || 30,
+      autoScale:els.autoScale.checked,
+      useCurrentSourcePoseAsRest:els.useCurrentRest.checked,
+      sourceRestTime:restTime,
+      useWorldLocation:els.useWorldLocation.checked,
+      headSource:els.headSource.value,
+      headTarget:els.headTarget.value,
+      faceSettings:faceSettings(),
+      onProgress:setProgress
+    });
+    state.retargetClip = result.clip;
+
+    let message = `Retarget FK terminado: ${result.validPairs}/${result.totalPairs} pares, ${result.frameCount} frames, scale ${result.locationScale.toFixed(4)}.`;
+
+    if (els.autoBakeIk.checked && state.ikChains.length){
+      const ik = await bakeIkIntoClip({
+        targetRig:state.targetRig,
+        clip:state.retargetClip,
+        pairs:state.pairs,
+        ikChains:state.ikChains,
+        targetPrefix,
+        fps:Number(els.fpsInput.value) || 30,
+        onProgress:setProgress
+      });
+      state.retargetClip = ik.clip;
+      message += ` FK→IK: ${ik.chains} cadenas horneadas.`;
+    }
+
+    activateClip(state.targetRig,state.retargetClip);
+    state.currentTime = 0;
+    seek(0);
+    setStatus(message,"success");
+  }catch(err){
+    console.error(err);
+    setStatus(err.message || String(err),"error");
+  }finally{
+    setBusy(false);
+    hideProgress();
+    updateButtons();
+  }
+}
+
+async function convertIk(){
+  if (!state.retargetClip || state.busy) return;
+  state.playing = false;
+  setBusy(true);
+  try{
+    const result = await bakeIkIntoClip({
+      targetRig:state.targetRig,
+      clip:state.retargetClip,
+      pairs:state.pairs,
+      ikChains:state.ikChains,
+      targetPrefix:els.targetPrefix.value || "",
+      fps:Number(els.fpsInput.value) || 30,
+      onProgress:setProgress
+    });
+    state.retargetClip = result.clip;
+    activateClip(state.targetRig,state.retargetClip);
+    seek(0);
+    setStatus(`FK → IK horneado en ${result.chains} cadenas.`,"success");
+  }catch(err){
+    console.error(err);
+    setStatus(err.message || String(err),"error");
+  }finally{
+    setBusy(false);
+    hideProgress();
+  }
+}
+
+async function exportGlb(){
+  if (!state.targetRig || !state.retargetClip) return;
+  const clip = state.retargetClip;
+  state.playing = false;
+  setBusy(true);
+  setStatus("Preparando GLB…");
+  try{
+    resetRigToRest(state.targetRig);
+    const exporter = new GLTFExporter();
+    const data = await exporter.parseAsync(state.targetRig.root,{
+      binary:true,
+      trs:true,
+      onlyVisible:false,
+      animations:[clip],
+      includeCustomExtensions:true
+    });
+    const name = safeBaseName(state.targetRig.fileName || "target") + "_retargeted.glb";
+    downloadBlob(new Blob([data],{type:"model/gltf-binary"}),name);
+    activateClip(state.targetRig,clip);
+    seek(0);
+    setStatus(`GLB exportado: ${name}`,"success");
+  }catch(err){
+    console.error(err);
+    setStatus(`Falló la exportación GLB: ${err.message || err}`,"error");
+  }finally{
+    setBusy(false);
+  }
+}
+
+function exportClipJson(){
+  if (!state.retargetClip) return;
+  const json = state.retargetClip.toJSON ? state.retargetClip.toJSON() : THREE.AnimationClip.toJSON(state.retargetClip);
+  const name = safeBaseName(state.targetRig?.fileName || "target") + "_retargeted.animation.json";
+  downloadBlob(new Blob([JSON.stringify(json,null,2)],{type:"application/json"}),name);
+}
+
+function setupDropZone(element,kind){
+  element.addEventListener("dragover",e => {
+    e.preventDefault();
+    element.classList.add("dragover");
+  });
+  element.addEventListener("dragleave",() => element.classList.remove("dragover"));
+  element.addEventListener("drop",async e => {
+    e.preventDefault();
+    element.classList.remove("dragover");
+    const file = [...e.dataTransfer.files].find(f => f.name.toLowerCase().endsWith(".fbx"));
+    if (!file) return setStatus("Suelta un archivo .fbx.","error");
+    try{ await loadFbx(file,kind); }
+    catch(err){ console.error(err); setStatus(err.message || String(err),"error"); }
+  });
+}
+
+els.sourceFile.addEventListener("change",async () => {
+  try{ await loadFbx(els.sourceFile.files[0],"Source"); }
+  catch(err){ console.error(err);setStatus(err.message || String(err),"error"); }
+});
+els.targetFile.addEventListener("change",async () => {
+  try{ await loadFbx(els.targetFile.files[0],"Target"); }
+  catch(err){ console.error(err);setStatus(err.message || String(err),"error"); }
+});
+setupDropZone(els.sourceViewport,"Source");
+setupDropZone(els.targetViewport,"Target");
+
+els.sourceClipSelect.addEventListener("change",() => {
+  const clip = state.sourceRig?.animations[Number(els.sourceClipSelect.value)] || null;
+  state.sourceClip = clip;
+  state.retargetClip = null;
+  if (clip) activateClip(state.sourceRig,clip);
+  if (state.targetRig) resetRigToRest(state.targetRig);
+  state.currentTime = 0;
+  updateTransport();
+  updateButtons();
+});
+els.presetSelect.addEventListener("change",async () => {
+  try{ await loadSelectedPreset(); }
+  catch(err){ console.error(err);setStatus(err.message || String(err),"error"); }
+});
+els.reloadPresetBtn.addEventListener("click",async () => {
+  try{ await loadSelectedPreset(); }
+  catch(err){ setStatus(err.message || String(err),"error"); }
+});
+els.savePresetBtn.addEventListener("click",saveCustomPreset);
+els.presetFile.addEventListener("change",async () => {
+  const file = els.presetFile.files[0];
+  if (!file) return;
+  try{
+    const data = JSON.parse(await file.text());
+    applyPresetData(data,"JSON importado");
+    state.customPresets.push(data);
+    persistCustomPresets();
+    renderPresetSelect();
+    els.presetSelect.value = `custom:${state.customPresets.length-1}`;
+  }catch(err){
+    setStatus(`JSON inválido: ${err.message || err}`,"error");
+  }
+  els.presetFile.value = "";
+});
+
+els.sourcePrefix.addEventListener("input",() => { renderMappings();updateValidCount(); });
+els.targetPrefix.addEventListener("input",() => { renderMappings();updateValidCount(); });
+els.mapSearch.addEventListener("input",renderMappings);
+els.addPairBtn.addEventListener("click",() => {
+  state.pairs.push(normalizePair());
+  renderMappings();updateValidCount();
+});
+els.addAllBtn.addEventListener("click",addAllSourceBones);
+els.autoMatchBtn.addEventListener("click",autoMatch);
+els.sortBtn.addEventListener("click",() => {
+  state.pairs.sort((a,b) => a.source.localeCompare(b.source,undefined,{numeric:true,sensitivity:"base"}));
+  renderMappings();
+});
+els.clearMapBtn.addEventListener("click",() => {
+  state.pairs = [];
+  renderMappings();updateValidCount();
+});
+
+els.facePerRegion.addEventListener("change",renderFaceRegions);
+els.addIkChainBtn.addEventListener("click",() => {
+  state.ikChains.push(normalizeIkChain());
+  renderIkRows();updateButtons();
+});
+els.applyBtn.addEventListener("click",applyRetarget);
+els.convertIkBtn.addEventListener("click",convertIk);
+els.exportGlbBtn.addEventListener("click",exportGlb);
+els.exportClipBtn.addEventListener("click",exportClipJson);
+els.frameSourceBtn.addEventListener("click",() => sourceView.frame());
+els.frameTargetBtn.addEventListener("click",() => targetView.frame());
+
+els.timeline.addEventListener("input",() => {
+  state.playing = false;
+  els.playBtn.textContent = "▶";
+  seek(Number(els.timeline.value));
+});
+els.playBtn.addEventListener("click",() => {
+  if (!state.sourceClip) return;
+  state.playing = !state.playing;
+  els.playBtn.textContent = state.playing ? "❚❚" : "▶";
+  state.lastTick = performance.now();
+});
+
+function animate(now){
+  const dt = Math.min(.1,(now-state.lastTick)/1000);
+  state.lastTick = now;
+  if (state.playing && !state.busy){
+    const d = duration();
+    if (d > 0){
+      let next = state.currentTime + dt;
+      if (next > d) next = 0;
+      seek(next);
+    }
+  }
+  sourceView.render();
+  targetView.render();
+  requestAnimationFrame(animate);
+}
+
+renderFaceRegions();
+renderIkRows();
+renderMappings();
+updateTransport();
+updateButtons();
+loadPresetManifest();
+requestAnimationFrame(animate);
