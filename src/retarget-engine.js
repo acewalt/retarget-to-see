@@ -1707,6 +1707,7 @@ export function serializeMap(config){
   return {
     name:config.name || "Custom Web Retarget Map",
     version:1,
+    axis_convention:config.axis_convention || "THREE_Y_UP",
     target_kind:config.target_kind || "generic",
     source_prefix:config.sourcePrefix || "",
     namespace_strip:config.targetPrefix || "",
