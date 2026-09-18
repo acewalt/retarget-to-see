@@ -723,6 +723,10 @@ export async function bakeRetarget(options){
   if (!sourceClip) throw new Error("El Source no tiene un clip seleccionado.");
   if (!pairs.length) throw new Error("El bone map está vacío.");
 
+  // Clear any non-destructive custom-rest preview before sampling the clip.
+  // FBX clips do not necessarily key every bone/channel, so leaving preview
+  // transforms in place would contaminate unkeyed channels.
+  resetRigToRest(sourceRig);
   activateClip(sourceRig,sourceClip);
   // The current source pose must already be positioned by the caller if it
   // wants to use it as the rest baseline. activateClip starts at t=0, so
