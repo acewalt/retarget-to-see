@@ -443,6 +443,99 @@ function skinBoneCandidates(rig,key){
   return out;
 }
 
+function segmentInsensitiveKey(name=""){
+  let key = anatomicalBoneKey(name);
+  if (!key) return "";
+
+  // Do NOT collapse numbers for fingers or spine: those numbers are semantic.
+  if (/(thumb|index|middle|ring|little|spine)/.test(key)) return key;
+
+  // Rigify/CloudRig may split long deform chains into .001/.002 segments.
+  // FBXLoader removes punctuation, so DEF-upper_arm.L.001 becomes arml001.
+  // For matching an FK control, treat those trailing segment numbers as the
+  // same anatomical limb and choose the closest weighted segment spatially.
+  key = key
+    .replace(/([lr])0*\d+$/,"$1")
+    .replace(/0*\d+([lr])$/,"$1");
+
+  return key;
+}
+
+function sideHintFromName(name=""){
+  const key = anatomicalBoneKey(name);
+  if (!key) return "";
+  const m = key.match(/([lr])(?:0*\d+)?$/);
+  return m ? m[1] : "";
+}
+
+function broadRegionKey(name=""){
+  const key = segmentInsensitiveKey(name);
+  if (!key) return "";
+
+  if (key.includes("forearm")) return "forearm";
+  if (key.includes("arm")) return "arm";
+  if (key.includes("shoulder")) return "shoulder";
+  if (key.includes("thigh")) return "thigh";
+  if (key.includes("shin") || key.includes("calf")) return "shin";
+  if (key.includes("foot")) return "foot";
+  if (key.includes("toe")) return "toe";
+  if (key.includes("hand")) return "hand";
+  if (key.includes("neck")) return "neck";
+  if (key.includes("head")) return "head";
+  if (key.includes("chest")) return "chest";
+  if (key.includes("spine")) return "spine";
+  if (key.includes("hips") || key.includes("pelvis") || key === "hip") return "hips";
+  return key;
+}
+
+function nearestCandidateToControl(rig,direct,candidates){
+  if (!candidates?.length) return null;
+  if (candidates.length === 1) return candidates[0];
+  if (!direct) return null;
+
+  const controlRest = rig.rest.get(direct.name);
+  if (!controlRest) return null;
+
+  const ranked = candidates
+    .map(b => ({
+      bone:b,
+      d:controlRest.worldPosition.distanceTo(
+        rig.rest.get(b.name)?.worldPosition || controlRest.worldPosition
+      )
+    }))
+    .sort((a,b) => a.d - b.d);
+
+  if (!ranked.length) return null;
+
+  // Overlapping FK/deform bones normally have ~zero distance. For segmented
+  // deform chains pick the closest segment. Side/region filtering happens
+  // before this function, so nearest is a much safer fallback than a name guess.
+  return ranked[0].bone;
+}
+
+function segmentedDeformCandidates(rig,name){
+  const deformNames = deformBoneNameSet(rig);
+  if (!deformNames.size) return [];
+
+  const wantedKey = segmentInsensitiveKey(name);
+  const wantedSide = sideHintFromName(name);
+  const wantedRegion = broadRegionKey(name);
+
+  return rig.bones.filter(b => {
+    if (!deformNames.has(b.name)) return false;
+    const candidateSide = sideHintFromName(b.name);
+    if (wantedSide && candidateSide && candidateSide !== wantedSide) return false;
+
+    const candidateKey = segmentInsensitiveKey(b.name);
+    if (candidateKey === wantedKey) return true;
+
+    // Last-resort anatomical region fallback for names such as
+    // DEF-upper_arm.L.001 vs FK-UpperArm.L.
+    return wantedRegion
+      && broadRegionKey(b.name) === wantedRegion;
+  });
+}
+
 export function resolveRetargetTargetBone(rig,shortName="",prefix=""){
   if (!rig || !shortName) return null;
 
@@ -462,11 +555,23 @@ export function resolveRetargetTargetBone(rig,shortName="",prefix=""){
   const key = anatomicalBoneKey(shortName);
   let candidates = skinBoneCandidates(rig,key);
   if (candidates.length === 1) return candidates[0];
+  if (candidates.length > 1){
+    const nearest = nearestCandidateToControl(rig,direct,candidates);
+    if (nearest) return nearest;
+  }
 
   // Finger naming differs heavily between Blender rigs and FBX exports
   // (Finger_Index1 vs f_index.01, Thumb2 vs thumb.02, etc.).
   const finger = findFingerDeformBone(rig,shortName);
   if (finger) return finger;
+
+  // Rigify/CloudRig often split arm/leg deform bones into .001/.002 chains.
+  // Those suffixes caused perfectly valid limbs to be marked invalid.
+  candidates = segmentedDeformCandidates(rig,shortName);
+  if (candidates.length){
+    const nearest = nearestCandidateToControl(rig,direct,candidates);
+    if (nearest) return nearest;
+  }
 
   // A few rigs use pelvis rather than hips.
   if (key === "hips"){
