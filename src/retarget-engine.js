@@ -1272,29 +1272,28 @@ function actualPairRecords(pairs,sourceRig,targetRig,sourcePrefix,targetPrefix){
       continue;
     }
 
-    const targetBone = resolveRetargetTargetBone(
-      targetRig,
-      raw.target,
-      targetPrefix
-    );
-    if (!targetBone) continue;
-
     if (raw.set_as_root){
-      // Blender can propagate a Root control through constraints. FBX cannot.
-      // Split ARP's "Set as Root" semantics:
-      //   - rotation -> the resolved deform proxy
-      //   - translation -> the whole imported Target object
-      // This prevents partial-skeleton translation and the long vertex spikes.
+      // Auto-Rig Pro "Set as Root" is the global motion reference. In Blender
+      // it targets TORSO-Spine through rig constraints; in plain FBX those
+      // constraints are gone. The faithful browser analogue is:
+      //   ROT -> whole Target object
+      //   LOC -> whole Target object
+      // Pelvis articulation remains on Hips -> HIP-Spine -> DEF-Hips.
+      const rootTargetExists = resolveBone(targetRig,raw.target,targetPrefix)
+        || resolveRetargetTargetBone(targetRig,raw.target,targetPrefix);
+      if (!rootTargetExists) continue;
+
       out.push({
         ...raw,
         pairIndex,
         channels:"ROT",
         _rotation_only:true,
+        _root_rotation:true,
         sourceBone,
-        targetBone,
-        targetRoot:false,
+        targetBone:null,
+        targetRoot:true,
         sourceRest:sourceRig.rest.get(sourceBone.name),
-        targetRest:targetRig.rest.get(targetBone.name)
+        targetRest:null
       });
 
       const locSource = rootMotionSourceForBone(sourceRig,sourceBone);
@@ -1312,6 +1311,13 @@ function actualPairRecords(pairs,sourceRig,targetRig,sourcePrefix,targetPrefix){
       });
       continue;
     }
+
+    const targetBone = resolveRetargetTargetBone(
+      targetRig,
+      raw.target,
+      targetPrefix
+    );
+    if (!targetBone) continue;
 
     out.push({
       ...raw,
@@ -1391,7 +1397,8 @@ export async function bakeRetarget(options){
   for (let i=0;i<frameCount;i++) times[i] = Math.min(duration,i*step);
   times[frameCount-1] = duration;
 
-  const rootLocationRecords = records.filter(r => r.targetRoot);
+  const rootRotationRecords = records.filter(r => r.targetRoot && pairHasRotation(r));
+  const rootLocationRecords = records.filter(r => r.targetRoot && pairHasLocation(r));
   const boneRecords = records.filter(r => !r.targetRoot && r.targetBone);
 
   const targetByActual = new Map();
@@ -1414,7 +1421,9 @@ export async function bakeRetarget(options){
   const qValues = new Map();
   const pValues = new Map();
   const rootPValues = rootLocationRecords.length ? [] : null;
+  const rootQValues = rootRotationRecords.length ? [] : null;
   const previousQ = new Map();
+  let previousRootQ = null;
   for (const n of rotationTargets) qValues.set(n,[]);
   for (const n of locationTargets) pValues.set(n,[]);
 
@@ -1475,6 +1484,53 @@ export async function bakeRetarget(options){
     }
     if (rootPValues) pushVec(rootPValues,rootLocalPos);
 
+    // Global root rotation. This was the missing half of Set-as-Root:
+    // previous builds animated only root position, so the character moved
+    // through space but did not turn with the Source.
+    let rootDeltaQ = new THREE.Quaternion(); // identity
+    let rootLocalQuat = targetRig.rootRest?.quaternion.clone()
+      || targetRig.root.quaternion.clone();
+
+    for (const r of rootRotationRecords){
+      const srcRest = sourceRest.get(r.sourceBone.name);
+      if (!srcRest) continue;
+
+      const srcPoseQ = new THREE.Quaternion();
+      r.sourceBone.matrixWorld.decompose(
+        new THREE.Vector3(),
+        srcPoseQ,
+        new THREE.Vector3()
+      );
+
+      const motionScale = pairMotionScale(r,faceSettings)
+        * Number(r.influence ?? 1);
+      const deltaQ = quatScaledDelta(
+        srcPoseQ,
+        srcRest.worldQuaternion,
+        motionScale
+      );
+
+      rootDeltaQ.multiply(deltaQ).normalize();
+    }
+
+    if (rootQValues){
+      rootLocalQuat = rootDeltaQ
+        .clone()
+        .multiply(targetRig.rootRest?.quaternion || targetRig.root.quaternion)
+        .normalize();
+      shortestQuatInPlace(rootLocalQuat,previousRootQ);
+      previousRootQ = rootLocalQuat.clone();
+      pushQuat(rootQValues,rootLocalQuat);
+    }
+
+    // Bone tracks are baked in the Target's static-root frame. Because the
+    // object itself now carries root rotation, remove that global rotation
+    // from each source world delta before deriving the bone-local pose. This
+    // prevents double rotation while preserving pelvis/spine articulation.
+    const rootDeltaInv = rootRotationRecords.length
+      ? rootDeltaQ.clone().invert()
+      : null;
+
     // PASS 1: rest locals + regular BASIS/WORLD location + world-delta rotation.
     for (const bone of sortedBones){
       const rest = targetRig.rest.get(bone.name);
@@ -1523,11 +1579,14 @@ export async function bakeRetarget(options){
         );
         const motionScale = pairMotionScale(rotRec,faceSettings)
           * Number(rotRec.influence ?? 1);
-        const deltaQ = quatScaledDelta(
+        let deltaQ = quatScaledDelta(
           srcPoseQ,
           srcRest.worldQuaternion,
           motionScale
         );
+        if (rootDeltaInv){
+          deltaQ = rootDeltaInv.clone().multiply(deltaQ).normalize();
+        }
         desiredWorldQ = deltaQ
           .multiply(rest.worldQuaternion.clone())
           .normalize();
@@ -1651,6 +1710,12 @@ export async function bakeRetarget(options){
       : ".position";
     tracks.push(new THREE.VectorKeyframeTrack(rootTrackName,times,rootPValues));
   }
+  if (rootQValues){
+    const rootTrackName = targetRig.root.name
+      ? makeTrackName(targetRig.root.name,"quaternion")
+      : ".quaternion";
+    tracks.push(new THREE.QuaternionKeyframeTrack(rootTrackName,times,rootQValues));
+  }
 
   const clip = new THREE.AnimationClip("Retargeted",duration,tracks);
   clip.resetDuration();
@@ -1669,6 +1734,8 @@ export async function bakeRetarget(options){
     locationScaleSamples:scaleInfo.samples,
     rootMotionChannels:rootLocationRecords.length,
     rootMotionSources:[...new Set(rootLocationRecords.map(r => r.sourceBone?.name).filter(Boolean))],
+    rootRotationChannels:rootRotationRecords.length,
+    rootRotationSources:[...new Set(rootRotationRecords.map(r => r.sourceBone?.name).filter(Boolean))],
     splitRootMappings:[...new Set(records
       .filter(r => r._rotation_only || r._location_only)
       .map(r => r.pairIndex))]
