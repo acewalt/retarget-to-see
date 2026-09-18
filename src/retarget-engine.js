@@ -336,7 +336,136 @@ function pairMotionScale(pair, faceSettings){
   return Number.isFinite(global) ? global : 1;
 }
 
-function sourceRestForBake(sourceRig, useCurrentSourcePoseAsRest){
+function quaternionFromWXYZ(v){
+  if (!Array.isArray(v) || v.length !== 4) return null;
+  const q = new THREE.Quaternion(Number(v[1]),Number(v[2]),Number(v[3]),Number(v[0]));
+  return Number.isFinite(q.lengthSq()) && q.lengthSq() > EPS ? q.normalize() : null;
+}
+
+function quaternionToWXYZ(q){
+  return [q.w,q.x,q.y,q.z];
+}
+
+function cloneRestEntry(base){
+  return {
+    ...base,
+    world:base.world.clone(),
+    worldPosition:base.worldPosition.clone(),
+    worldQuaternion:base.worldQuaternion.clone(),
+    worldScale:base.worldScale.clone(),
+    position:base.position.clone(),
+    quaternion:base.quaternion.clone(),
+    scale:base.scale.clone(),
+    externalParentWorld:base.externalParentWorld?.clone?.() || base.externalParentWorld || null
+  };
+}
+
+function rootWorldComponents(rig){
+  rig.root.updateMatrixWorld(true);
+  const position = new THREE.Vector3();
+  const quaternion = new THREE.Quaternion();
+  const scale = new THREE.Vector3();
+  rig.root.matrixWorld.decompose(position,quaternion,scale);
+  return {position,quaternion,scale};
+}
+
+function worldDeltaFromPreset(rig,savedRestQ,savedPoseQ){
+  // BlendCap stores armature-local absolute rotations. Convert the saved
+  // pose change into a delta first, then carry that delta through the FBX
+  // root orientation into Three.js world space. This is also the native
+  // path for web-saved presets, which use root-local coordinates.
+  const deltaLocal = savedPoseQ.clone().multiply(savedRestQ.clone().invert()).normalize();
+  const rootQ = rootWorldComponents(rig).quaternion;
+  return rootQ.clone().multiply(deltaLocal).multiply(rootQ.clone().invert()).normalize();
+}
+
+function entryMapForRig(rig,preset,sourcePrefix=""){
+  const out = new Map();
+  const bones = preset?.bones || {};
+  for (const [name,entry] of Object.entries(bones)){
+    const bone = resolveBone(rig,name,sourcePrefix);
+    if (bone) out.set(bone.name,entry);
+  }
+  return out;
+}
+
+export function buildRestOverrideFromPreset(sourceRig,preset,{
+  sourcePrefix="",
+  includeLocScale=Boolean(preset?.include_loc_scale)
+}={}){
+  if (!sourceRig || !preset?.bones) return sourceRig?.rest || new Map();
+
+  const entries = entryMapForRig(sourceRig,preset,sourcePrefix);
+  const result = new Map();
+  const rootInv = sourceRig.root.matrixWorld.clone().invert();
+  const rootWorld = sourceRig.root.matrixWorld.clone();
+  const rootScale = rootWorldComponents(sourceRig).scale;
+
+  for (const bone of sourceRig.bones){
+    const base = sourceRig.rest.get(bone.name);
+    const item = cloneRestEntry(base);
+    const entry = entries.get(bone.name);
+    if (!entry || typeof entry !== "object"){
+      result.set(bone.name,item);
+      continue;
+    }
+
+    let desiredWorldQ = base.worldQuaternion.clone();
+    const savedRestQ = quaternionFromWXYZ(entry.rest);
+    const savedPoseQ = quaternionFromWXYZ(entry.pose);
+    if (savedRestQ && savedPoseQ){
+      const deltaWorld = worldDeltaFromPreset(sourceRig,savedRestQ,savedPoseQ);
+      desiredWorldQ = deltaWorld.multiply(base.worldQuaternion.clone()).normalize();
+    }
+
+    let desiredWorldPos = base.worldPosition.clone();
+    let desiredWorldScale = base.worldScale.clone();
+
+    if (includeLocScale){
+      if (Array.isArray(entry.loc) && entry.loc.length === 3){
+        desiredWorldPos = new THREE.Vector3(
+          Number(entry.loc[0]),Number(entry.loc[1]),Number(entry.loc[2])
+        ).applyMatrix4(rootWorld);
+      }
+      if (Array.isArray(entry.scale) && entry.scale.length === 3){
+        desiredWorldScale = new THREE.Vector3(
+          Number(entry.scale[0]) * rootScale.x,
+          Number(entry.scale[1]) * rootScale.y,
+          Number(entry.scale[2]) * rootScale.z
+        );
+      }
+    }
+
+    item.worldPosition = desiredWorldPos;
+    item.worldQuaternion = desiredWorldQ;
+    item.worldScale = desiredWorldScale;
+    item.world = new THREE.Matrix4().compose(
+      desiredWorldPos.clone(),desiredWorldQ.clone(),desiredWorldScale.clone()
+    );
+
+    // For rotation-only overrides BlendCap deliberately keeps the live
+    // edit-rest translation/scale. Full v5 presets can override all three.
+    if (includeLocScale){
+      const parentWorld = bone.parent?.isBone
+        ? sourceRig.rest.get(bone.parent.name).world
+        : (base.externalParentWorld || new THREE.Matrix4());
+      const local = parentWorld.clone().invert().multiply(item.world);
+      local.decompose(item.position,item.quaternion,item.scale);
+    } else {
+      item.position.copy(base.position);
+      item.scale.copy(base.scale);
+      const parentWorld = bone.parent?.isBone
+        ? sourceRig.rest.get(bone.parent.name).world
+        : (base.externalParentWorld || new THREE.Matrix4());
+      const parentQ = decomposeWorld(parentWorld).quaternion;
+      item.quaternion.copy(parentQ.clone().invert().multiply(desiredWorldQ).normalize());
+    }
+    result.set(bone.name,item);
+  }
+  return result;
+}
+
+function sourceRestForBake(sourceRig,useCurrentSourcePoseAsRest,includeLocScale=false){
   if (!useCurrentSourcePoseAsRest) return sourceRig.rest;
 
   sourceRig.root.updateMatrixWorld(true);
@@ -344,25 +473,122 @@ function sourceRestForBake(sourceRig, useCurrentSourcePoseAsRest){
   for (const bone of sourceRig.bones){
     const base = sourceRig.rest.get(bone.name);
     const wd = decomposeWorld(bone.matrixWorld);
-    // Match BlendCap's default behavior: the override changes rotation,
-    // while location/scale continue to use the imported bind/rest baseline.
+    const desiredPos = includeLocScale ? wd.position : base.worldPosition;
+    const desiredScale = includeLocScale ? wd.scale : base.worldScale;
     const world = new THREE.Matrix4().compose(
-      base.worldPosition.clone(),
-      wd.quaternion.clone(),
-      base.worldScale.clone()
+      desiredPos.clone(),wd.quaternion.clone(),desiredScale.clone()
     );
-    map.set(bone.name,{
-      ...base,
-      world,
-      worldPosition:base.worldPosition.clone(),
-      worldQuaternion:wd.quaternion.clone(),
-      worldScale:base.worldScale.clone(),
-      position:base.position.clone(),
-      quaternion:base.quaternion.clone(),
-      scale:base.scale.clone()
-    });
+    const item = cloneRestEntry(base);
+    item.world = world;
+    item.worldPosition = desiredPos.clone();
+    item.worldQuaternion = wd.quaternion.clone();
+    item.worldScale = desiredScale.clone();
+    item.quaternion.copy(bone.quaternion);
+    if (includeLocScale){
+      item.position.copy(bone.position);
+      item.scale.copy(bone.scale);
+    }
+    map.set(bone.name,item);
   }
   return map;
+}
+
+export function previewRestPosePreset(sourceRig,preset,{
+  sourcePrefix="",
+  includeLocScale=Boolean(preset?.include_loc_scale)
+}={}){
+  if (!sourceRig || !preset?.bones) return 0;
+  resetRigToRest(sourceRig);
+  const entries = entryMapForRig(sourceRig,preset,sourcePrefix);
+  const desired = buildRestOverrideFromPreset(sourceRig,preset,{sourcePrefix,includeLocScale});
+  const sorted = [...sourceRig.bones].sort((a,b) =>
+    sourceRig.rest.get(a.name).depth - sourceRig.rest.get(b.name).depth
+  );
+
+  let applied = 0;
+  for (const bone of sorted){
+    const base = sourceRig.rest.get(bone.name);
+    const entry = entries.get(bone.name);
+    if (!entry){
+      bone.position.copy(base.position);
+      bone.quaternion.copy(base.quaternion);
+      bone.scale.copy(base.scale);
+      bone.updateMatrix();
+      sourceRig.root.updateMatrixWorld(true);
+      continue;
+    }
+
+    const target = desired.get(bone.name);
+    const parentWorld = bone.parent?.matrixWorld || new THREE.Matrix4();
+    const parentInv = parentWorld.clone().invert();
+
+    // Absolute desired world matrix -> local pose under the parent as it
+    // currently stands. This mirrors BlendCap's parent-before-child preview.
+    const local = parentInv.multiply(target.world.clone());
+    const pos = new THREE.Vector3();
+    const quat = new THREE.Quaternion();
+    const scale = new THREE.Vector3();
+    local.decompose(pos,quat,scale);
+
+    bone.quaternion.copy(quat);
+    if (includeLocScale){
+      bone.position.copy(pos);
+      bone.scale.copy(scale);
+    } else {
+      bone.position.copy(base.position);
+      bone.scale.copy(base.scale);
+    }
+    bone.updateMatrix();
+    sourceRig.root.updateMatrixWorld(true);
+    applied++;
+  }
+  sourceRig.activeClip = null;
+  sourceRig.activeAction = null;
+  return applied;
+}
+
+export function captureRestPosePreset(sourceRig,{
+  name="Web Rest Pose",
+  includeLocScale=false
+}={}){
+  if (!sourceRig) throw new Error("No hay Source Rig.");
+  sourceRig.root.updateMatrixWorld(true);
+  const rootInv = sourceRig.root.matrixWorld.clone().invert();
+  const bones = {};
+
+  for (const bone of sourceRig.bones){
+    const base = sourceRig.rest.get(bone.name);
+    const restArm = rootInv.clone().multiply(base.world);
+    const poseArm = rootInv.clone().multiply(bone.matrixWorld);
+    const restD = decomposeWorld(restArm);
+    const poseD = decomposeWorld(poseArm);
+
+    const rotDelta = Math.abs(restD.quaternion.dot(poseD.quaternion));
+    const posDelta = restD.position.distanceTo(poseD.position);
+    const scaleDelta = restD.scale.distanceTo(poseD.scale);
+    const changed = (1 - rotDelta) > 1e-7
+      || (includeLocScale && (posDelta > 1e-7 || scaleDelta > 1e-7));
+    if (!changed) continue;
+
+    const entry = {
+      rest:quaternionToWXYZ(restD.quaternion),
+      pose:quaternionToWXYZ(poseD.quaternion)
+    };
+    if (includeLocScale){
+      entry.loc: undefined;
+    }
+    entry.loc = [poseD.position.x,poseD.position.y,poseD.position.z];
+    entry.scale = [poseD.scale.x,poseD.scale.y,poseD.scale.z];
+    bones[stripKnownPrefix(bone.name,"")] = entry;
+  }
+
+  return {
+    name,
+    format_version:5,
+    include_loc_scale:Boolean(includeLocScale),
+    web_coordinate_system:"three-root-local",
+    bones
+  };
 }
 
 function restForResolved(restMap, bone){
