@@ -1,0 +1,14 @@
+{
+  "attribution": "Rest-pose presets from Arcomade/BlendCap under GPL-3.0",
+  "source": "https://github.com/Arcomade/BlendCap",
+  "presets": [
+    {
+      "file": "T-POSE.json",
+      "name": "T-POSE"
+    },
+    {
+      "file": "A-POSE.json",
+      "name": "A-POSE"
+    }
+  ]
+}
