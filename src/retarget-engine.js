@@ -360,13 +360,24 @@ function cloneRestEntry(base){
   };
 }
 
-function rootWorldComponents(rig){
+function armatureWorldMatrix(rig){
   rig.root.updateMatrixWorld(true);
+  // FBXLoader commonly wraps the actual skeleton/armature node inside the
+  // returned Group. BlendCap rest-pose data is armature-local, so use the
+  // non-bone parent of a root bone rather than assuming the top FBX Group
+  // itself is the armature coordinate frame.
+  const rootBone = rig.bones.find(b => !b.parent?.isBone) || rig.bones[0];
+  if (rootBone?.parent?.matrixWorld) return rootBone.parent.matrixWorld.clone();
+  return rig.root.matrixWorld.clone();
+}
+
+function rootWorldComponents(rig){
+  const matrix = armatureWorldMatrix(rig);
   const position = new THREE.Vector3();
   const quaternion = new THREE.Quaternion();
   const scale = new THREE.Vector3();
-  rig.root.matrixWorld.decompose(position,quaternion,scale);
-  return {position,quaternion,scale};
+  matrix.decompose(position,quaternion,scale);
+  return {position,quaternion,scale,matrix};
 }
 
 function worldDeltaFromPreset(rig,savedRestQ,savedPoseQ){
@@ -397,8 +408,9 @@ export function buildRestOverrideFromPreset(sourceRig,preset,{
 
   const entries = entryMapForRig(sourceRig,preset,sourcePrefix);
   const result = new Map();
-  const rootInv = sourceRig.root.matrixWorld.clone().invert();
-  const rootWorld = sourceRig.root.matrixWorld.clone();
+  const armatureWorld = armatureWorldMatrix(sourceRig);
+  const rootInv = armatureWorld.clone().invert();
+  const rootWorld = armatureWorld;
   const rootScale = rootWorldComponents(sourceRig).scale;
 
   for (const bone of sourceRig.bones){
@@ -553,7 +565,7 @@ export function captureRestPosePreset(sourceRig,{
 }={}){
   if (!sourceRig) throw new Error("No hay Source Rig.");
   sourceRig.root.updateMatrixWorld(true);
-  const rootInv = sourceRig.root.matrixWorld.clone().invert();
+  const rootInv = armatureWorldMatrix(sourceRig).invert();
   const bones = {};
 
   for (const bone of sourceRig.bones){
