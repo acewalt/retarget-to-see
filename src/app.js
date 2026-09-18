@@ -235,6 +235,172 @@ function safeBaseName(name="file"){
   return name.replace(/\.[^.]+$/,"").replace(/[^a-z0-9_\-]+/gi,"_") || "retargeted";
 }
 
+const VIEWPORT_MATERIAL_ORIGINAL = "__retargetToSeeOriginalMaterial";
+const VIEWPORT_MATERIAL_SOLID = "__retargetToSeeSolidMaterial";
+
+function makeSolidWhiteMaterial(){
+  return new THREE.MeshStandardMaterial({
+    color:0xffffff,
+    roughness:1,
+    metalness:0,
+    side:THREE.DoubleSide
+  });
+}
+
+function applySolidWhiteViewport(root){
+  // Viewport-only override. Keep the real FBX materials so export can
+  // restore them without reloading the file.
+  root.traverse(obj => {
+    if (!obj.isMesh) return;
+
+    if (!(VIEWPORT_MATERIAL_ORIGINAL in obj.userData)){
+      obj.userData[VIEWPORT_MATERIAL_ORIGINAL] = obj.material;
+    }
+
+    if (!(VIEWPORT_MATERIAL_SOLID in obj.userData)){
+      obj.userData[VIEWPORT_MATERIAL_SOLID] = Array.isArray(obj.material)
+        ? obj.material.map(() => makeSolidWhiteMaterial())
+        : makeSolidWhiteMaterial();
+    }
+
+    obj.material = obj.userData[VIEWPORT_MATERIAL_SOLID];
+  });
+}
+
+function restoreOriginalViewportMaterials(root){
+  root.traverse(obj => {
+    if (!obj.isMesh) return;
+    if (VIEWPORT_MATERIAL_ORIGINAL in obj.userData){
+      obj.material = obj.userData[VIEWPORT_MATERIAL_ORIGINAL];
+    }
+  });
+}
+
+function compactBoneName(name=""){
+  let n = String(name).toLowerCase();
+  const colon = n.lastIndexOf(":");
+  if (colon >= 0) n = n.slice(colon + 1);
+  return n
+    .replace(/^(def|org|mch|ctrl|control|bone)[._\- ]*/,"")
+    .replace(/^c[._\- ]+/,"")
+    .replace(/[^a-z0-9]/g,"");
+}
+
+function collectBones(root){
+  const bones = [];
+  root.traverse(obj => { if (obj.isBone) bones.push(obj); });
+  return bones;
+}
+
+function scoreNamedBone(bone,kind){
+  const n = compactBoneName(bone.name);
+  if (!n) return -Infinity;
+
+  if (kind === "HEAD"){
+    if (n === "head") return 1000;
+    if (n.endsWith("head")) return 900;
+    if (n.includes("head") && !n.includes("tweak")) return 700;
+    if (n === "neck") return 200;
+    return -Infinity;
+  }
+
+  if (kind === "HIPS"){
+    if (n === "hips" || n === "pelvis") return 1000;
+    if (n.endsWith("hips") || n.endsWith("pelvis")) return 900;
+    if (n.includes("hips") || n.includes("pelvis")) return 750;
+    if (n === "spine") return 250;
+    if (n.startsWith("spine")) return 150;
+    return -Infinity;
+  }
+
+  return -Infinity;
+}
+
+function findOrientationBone(root,kind){
+  const bones = collectBones(root);
+  let best = null;
+  let bestScore = -Infinity;
+  for (const bone of bones){
+    let score = scoreNamedBone(bone,kind);
+    if (!Number.isFinite(score)) continue;
+
+    // Prefer deform/FK-ish bones over mechanism/tweak controls when names tie.
+    const raw = bone.name.toLowerCase();
+    if (raw.includes("mch")) score -= 80;
+    if (raw.includes("tweak")) score -= 80;
+    if (raw.includes("org")) score -= 20;
+
+    if (score > bestScore){
+      best = bone;
+      bestScore = score;
+    }
+  }
+  return best;
+}
+
+function normalizeTargetUpright(root){
+  // FBX can contain an armature/object transform that leaves the complete
+  // receiver lying on X/Z even though its bind pose is otherwise correct.
+  // Fix that transform BEFORE createRigState() snapshots the target rest.
+  root.updateMatrixWorld(true);
+
+  const hips = findOrientationBone(root,"HIPS");
+  const head = findOrientationBone(root,"HEAD");
+  if (!hips || !head){
+    return {
+      corrected:false,
+      reason:"No pude identificar Head/Hips para detectar orientación."
+    };
+  }
+
+  const hipsPos = new THREE.Vector3().setFromMatrixPosition(hips.matrixWorld);
+  const headPos = new THREE.Vector3().setFromMatrixPosition(head.matrixWorld);
+  const bodyUp = headPos.clone().sub(hipsPos);
+  if (bodyUp.lengthSq() < 1e-10){
+    return {
+      corrected:false,
+      reason:"Head y Hips no definen un eje corporal válido."
+    };
+  }
+
+  bodyUp.normalize();
+  const worldUp = new THREE.Vector3(0,1,0);
+  const alignment = bodyUp.dot(worldUp);
+
+  // Already upright (or almost upright). Do not introduce a gratuitous
+  // correction on FBXs that were imported correctly.
+  if (alignment >= 0.82){
+    return {
+      corrected:false,
+      alignment,
+      head:head.name,
+      hips:hips.name,
+      reason:"El Target ya está vertical."
+    };
+  }
+
+  // If the character is upside-down this also resolves the 180° case.
+  const correction = new THREE.Quaternion().setFromUnitVectors(bodyUp,worldUp);
+  root.quaternion.premultiply(correction).normalize();
+  root.updateMatrix();
+  root.updateMatrixWorld(true);
+
+  const newHips = new THREE.Vector3().setFromMatrixPosition(hips.matrixWorld);
+  const newHead = new THREE.Vector3().setFromMatrixPosition(head.matrixWorld);
+  const newAlignment = newHead.sub(newHips).normalize().dot(worldUp);
+
+  return {
+    corrected:true,
+    alignment,
+    newAlignment,
+    angleDegrees:THREE.MathUtils.radToDeg(2 * Math.acos(
+      THREE.MathUtils.clamp(Math.abs(correction.w),0,1)
+    )),
+    head:head.name,
+    hips:hips.name
+  };
+}
+
 function forceTargetBindPose(root){
   // The Target is a receiver, never an animation source. FBX files can
   // contain Actions/Takes and can also be exported while a pose is active.
@@ -278,11 +444,20 @@ async function loadFbx(file,kind){
   // as a static rig in bind/rest pose and only receive the baked Source clip.
   let ignoredTargetClips = 0;
   let targetBindInfo = null;
+  let targetOrientationInfo = null;
   if (kind === "Target"){
     ignoredTargetClips = Array.isArray(root.animations) ? root.animations.length : 0;
+
+    // Order matters:
+    //   bind pose -> upright normalization -> rest snapshot
     targetBindInfo = forceTargetBindPose(root);
     root.animations = [];
+    targetOrientationInfo = normalizeTargetUpright(root);
   }
+
+  // Retargeting view is intentionally material-agnostic. Both rigs are shown
+  // as neutral white solids while the original FBX materials remain cached.
+  applySolidWhiteViewport(root);
 
   root.updateMatrixWorld(true);
   const rig = createRigState(root,file.name);
@@ -318,8 +493,11 @@ async function loadFbx(file,kind){
     const bindDetail = targetBindInfo?.skeletonCount
       ? ` Bind pose restaurado desde ${targetBindInfo.skeletonCount} skeleton(s).`
       : " No se encontró un SkinnedMesh con bind pose; se usa la pose estática importada.";
+    const orientationDetail = targetOrientationInfo?.corrected
+      ? ` Orientación corregida automáticamente (${targetOrientationInfo.angleDegrees.toFixed(1)}°) usando ${targetOrientationInfo.hips} → ${targetOrientationInfo.head}.`
+      : ` ${targetOrientationInfo?.reason || "Orientación sin cambios."}`;
     setStatus(
-      `Target cargado en pose neutral. ${ignoredTargetClips} Action/clip(s) del Target ignorados.${bindDetail}`,
+      `Target cargado en pose neutral. ${ignoredTargetClips} Action/clip(s) del Target ignorados.${bindDetail}${orientationDetail} Viewport: blanco sólido.`,
       "success"
     );
   }
@@ -1036,6 +1214,11 @@ async function exportGlb(){
   setStatus("Preparando GLB…");
   try{
     resetRigToRest(state.targetRig);
+
+    // White is viewport-only. Preserve the Target's actual materials in the
+    // exported GLB and immediately return to solid white afterwards.
+    restoreOriginalViewportMaterials(state.targetRig.root);
+
     const exporter = new GLTFExporter();
     const data = await exporter.parseAsync(state.targetRig.root,{
       binary:true,
@@ -1046,11 +1229,14 @@ async function exportGlb(){
     });
     const name = safeBaseName(state.targetRig.fileName || "target") + "_retargeted.glb";
     downloadBlob(new Blob([data],{type:"model/gltf-binary"}),name);
+
+    applySolidWhiteViewport(state.targetRig.root);
     activateClip(state.targetRig,clip);
     seek(0);
     setStatus(`GLB exportado: ${name}`,"success");
   }catch(err){
     console.error(err);
+    applySolidWhiteViewport(state.targetRig.root);
     setStatus(`Falló la exportación GLB: ${err.message || err}`,"error");
   }finally{
     setBusy(false);
