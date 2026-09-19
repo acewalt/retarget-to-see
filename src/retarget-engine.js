@@ -1771,6 +1771,7 @@ export async function bakeRetarget(options){
       let sourceKneeRelRest = null;
       let targetFootRelRest = null;
       let targetKneeRelRest = null;
+      let hipsSourceToTargetBasis = null;
       let pelvisFootScale = targetReach/sourceReach;
       let pelvisKneeScale = targetUpperLen/Math.max(sourceUpperLen,EPS);
 
@@ -1782,6 +1783,19 @@ export async function bakeRetarget(options){
         sourceKneeRelRest = srcHipsRestInv.clone().multiply(sMidRest.world);
         targetFootRelRest = tgtHipsRestInv.clone().multiply(tEndRest.world);
         targetKneeRelRest = tgtHipsRestInv.clone().multiply(tMidRest.world);
+
+        // Source and Target Hips local axes are not guaranteed to match.
+        // A delta expressed in Mixamo Hips coordinates cannot be applied
+        // directly in CloudRig Hips coordinates. Build a pure-rotation
+        // change-of-basis matrix:
+        //
+        //   vTargetLocal = inverse(QTargetRest) * QSourceRest * vSourceLocal
+        //
+        // and conjugate every Source-local pose delta through it.
+        const basisQ = tHipsRest.worldQuaternion.clone().invert()
+          .multiply(sHipsRest.worldQuaternion)
+          .normalize();
+        hipsSourceToTargetBasis = new THREE.Matrix4().makeRotationFromQuaternion(basisQ);
 
         const srcFootRestPos = new THREE.Vector3().setFromMatrixPosition(sourceFootRelRest);
         const tgtFootRestPos = new THREE.Vector3().setFromMatrixPosition(targetFootRelRest);
@@ -1808,6 +1822,7 @@ export async function bakeRetarget(options){
         sourceKneeRelRest,
         targetFootRelRest,
         targetKneeRelRest,
+        hipsSourceToTargetBasis,
         pelvisFootScale,
         pelvisKneeScale
       });
@@ -2166,6 +2181,7 @@ export async function bakeRetarget(options){
         && chain.sourceKneeRelRest
         && chain.targetFootRelRest
         && chain.targetKneeRelRest
+        && chain.hipsSourceToTargetBasis
       ){
         const targetHipsWorld = worldOut.get(chain.tHipsName);
         if (targetHipsWorld){
@@ -2176,12 +2192,24 @@ export async function bakeRetarget(options){
           const srcFootRelPose = srcHipsPoseInv.clone().multiply(chain.sEnd.matrixWorld);
           const srcKneeRelPose = srcHipsPoseInv.clone().multiply(chain.sMid.matrixWorld);
 
-          const footDelta = srcFootRelPose.clone()
+          const footDeltaSourceBasis = srcFootRelPose.clone()
             .multiply(chain.sourceFootRelRest.clone().invert());
-          const kneeDelta = srcKneeRelPose.clone()
+          const kneeDeltaSourceBasis = srcKneeRelPose.clone()
             .multiply(chain.sourceKneeRelRest.clone().invert());
 
-          // Rebase the full delta onto Target proportions. Scale only the
+          // Change basis from Mixamo-Hips local coordinates to CloudRig-Hips
+          // local coordinates. Conjugation is required for a rigid transform,
+          // not just rotating the translation vector.
+          const basis = chain.hipsSourceToTargetBasis;
+          const basisInv = basis.clone().invert();
+          const footDelta = basis.clone()
+            .multiply(footDeltaSourceBasis)
+            .multiply(basisInv);
+          const kneeDelta = basis.clone()
+            .multiply(kneeDeltaSourceBasis)
+            .multiply(basisInv);
+
+          // Rebase the converted delta onto Target proportions. Scale only the
           // translational component; preserve the quaternion exactly.
           function scaledPoseDelta(delta,scale){
             const p = new THREE.Vector3();
@@ -2492,7 +2520,7 @@ export async function bakeRetarget(options){
       reachScale:c.reachScale,
       pelvisFootScale:c.pelvisFootScale,
       targetMode:(c.sHips && c.tHipsName && c.sourceFootRelRest && c.targetFootRelRest)
-        ? "hips-pose-space-matrix"
+        ? "hips-pose-space-matrix+basis"
         : "thigh-relative-fallback"
     })),
     splitRootMappings:[...new Set(records
