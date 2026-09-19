@@ -21,7 +21,7 @@ import {
   captureCurrentRigReference,
   serializeMap
 } from "./retarget-engine.js?v=20260919-exact-fbx1";
-import { injectAnimationIntoOriginalFbx } from "./fbx-animation-injector.js?v=20260919-exact-fbx1";
+import { injectAnimationIntoOriginalFbx } from "./fbx-animation-injector.js?v=20260919-exact-fbx2";
 
 const $ = id => document.getElementById(id);
 
@@ -2935,15 +2935,36 @@ let originalRigFbxExporterPromise = null;
 
 async function loadOriginalRigFbxExporter(){
   if (!originalRigFbxExporterPromise){
-    originalRigFbxExporterPromise = import(
-      "https://esm.sh/@comfyorg/fbx-exporter-three@1.0.1?bundle&external=three"
-    );
+    originalRigFbxExporterPromise = (async () => {
+      const urls = [
+        "https://cdn.jsdelivr.net/npm/@comfyorg/fbx-exporter-three@1.0.1/+esm",
+        "https://esm.sh/@comfyorg/fbx-exporter-three@1.0.1?bundle&external=three"
+      ];
+      const errors = [];
+
+      for (const url of urls){
+        try{
+          const mod = await import(url);
+          if (mod?.FBXExporter) return mod;
+          errors.push(url + " → módulo sin FBXExporter");
+        }catch(err){
+          console.warn("FBX exporter CDN failed",url,err);
+          errors.push(url + " → " + (err?.message || err));
+        }
+      }
+
+      throw new Error(
+        "No pude cargar el exportador FBX. Intenté jsDelivr y esm.sh. "
+        + errors.join(" | ")
+      );
+    })().catch(err => {
+      // Do not cache a failed network import forever. A second click can retry.
+      originalRigFbxExporterPromise = null;
+      throw err;
+    });
   }
 
   const mod = await originalRigFbxExporterPromise;
-  if (!mod?.FBXExporter){
-    throw new Error("No pude cargar el exportador FBX del navegador.");
-  }
   return mod.FBXExporter;
 }
 
