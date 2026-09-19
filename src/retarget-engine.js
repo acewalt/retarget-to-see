@@ -1859,7 +1859,7 @@ export async function bakeRetarget(options){
     return false;
   }
 
-  for (const r of sourceRecordByName.values()){
+  if (targetMode !== "ORIGINAL_RIG") for (const r of sourceRecordByName.values()){
     const childTarget = r.targetBone.name;
     let parent = r.sourceBone.parent;
     let parentTarget = null;
@@ -2882,9 +2882,11 @@ export async function bakeRetarget(options){
     naturalHierarchyTargets:naturallyConnectedVirtualTargets,
     naturalHierarchyTargetCount:naturallyConnectedVirtualTargets.length,
     handEndEffectorCorrection:useArmEndEffectorCorrection,
-    handCorrectionMode:targetRig.cloudRigProfile
-      ? "blendcap-world-delta-only"
-      : (useArmEndEffectorCorrection ? "two-bone" : "disabled"),
+    handCorrectionMode:targetMode === "ORIGINAL_RIG"
+      ? "original-rig-fk-controls"
+      : targetRig.cloudRigProfile
+        ? "blendcap-world-delta-only"
+        : (useArmEndEffectorCorrection ? "two-bone" : "disabled"),
     handEndEffectorChains:armCorrectionChains.map(c => ({
       side:c.side,
       sourceUpper:c.sourceUpperLen,
