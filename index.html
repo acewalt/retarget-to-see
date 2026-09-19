@@ -293,14 +293,14 @@
       <section class="panel-section">
         <h2>5. Salida</h2>
         <div class="button-row">
-          <button id="exportGlbBtn" class="ghost" type="button" disabled>GLB experimental</button>
+          <button id="exportGlbBtn" class="ghost" type="button" disabled>GLB Action · RIG original</button>
           <button id="exportClipBtn" class="ghost" type="button" disabled>JSON técnico</button>
         </div>
         <button id="exportOriginalRigBtn" class="primary big" type="button" disabled>
           FBX Action · RIG original
         </button>
         <p class="hint">
-          Exporta el MISMO esqueleto/hierarquía del Target importado, sin reconstruirlo y sin malla. Para CloudRig la Action se hornea sobre los controles originales (FK-*, HIP-Spine, TORSO-Spine y root), no sobre DEF-*; en Blender importa el FBX y reutiliza esa Action en tu RIG-Sintel original.
+          FBX y GLB usan la misma Action para el RIG original: se hornea sobre FK-*, HIP-Spine, TORSO-Spine y root. Se restauran los nombres originales que FBXLoader había saneado (por ejemplo FK-UpperArmL → FK-UpperArm.L). El FBX exporta la jerarquía sin malla; el GLB usa una malla portadora invisible para conservar todos los huesos como joints.
         </p>
         <div class="progress-wrap" id="progressWrap" hidden>
           <div class="progress-track"><div id="progressBar"></div></div>
@@ -311,7 +311,7 @@
 
       <section class="notice">
         <strong>FBX y rigs de Blender</strong>
-        <p>Rigify/ARP/CloudRig dependen de constraints y drivers que FBX normalmente no conserva. Esta web retargetea los huesos que sí existen en el FBX; si un preset apunta a controles ausentes, esas filas quedan inválidas y no se hornean.</p>
+        <p>Rigify/ARP/CloudRig dependen de constraints y drivers que FBX normalmente no conserva. La vista web puede usar DEF-* para previsualizar, pero las salidas «RIG original» hornean los controles originales y recuperan los nombres FBX exactos guardados por Three.js.</p>
       </section>
     </aside>
   </main>
@@ -320,6 +320,6 @@
     Port web del retargeting inspirado en <a href="https://github.com/Arcomade/BlendCap" target="_blank" rel="noreferrer">BlendCap</a> · GPL-3.0 · sin garantía.
   </footer>
 
-  <script type="module" src="./src/app.js?v=20260919-cloudrig-original-controls3"></script>
+  <script type="module" src="./src/app.js?v=20260919-original-names1"></script>
 </body>
 </html>
