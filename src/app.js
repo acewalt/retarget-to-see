@@ -19,7 +19,7 @@ import {
   previewRestPosePreset,
   captureRestPosePreset,
   serializeMap
-} from "./retarget-engine.js";
+} from "./retarget-engine.js?v=20260919-cd52-armgood";
 
 const $ = id => document.getElementById(id);
 
@@ -1667,7 +1667,7 @@ async function applyRetarget(){
       includeRestLocationScale:els.includeRestLocScale.checked,
       sourceRestTime:restTime,
       useWorldLocation:els.useWorldLocation.checked,
-      correctHands:els.correctHands.checked,
+      correctHands:state.targetRig?.cloudRigProfile ? true : els.correctHands.checked,
       correctFeet:els.correctFeet.checked,
       headSource:els.headSource.value,
       headTarget:els.headTarget.value,
