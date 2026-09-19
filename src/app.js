@@ -80,6 +80,7 @@ const els = {
   playBtn:$("playBtn"),
   timeline:$("timeline"),
   timeLabel:$("timeLabel"),
+  copyFrameRotationsBtn:$("copyFrameRotationsBtn"),
   fpsInput:$("fpsInput"),
   syncCameras:$("syncCameras"),
   frameSourceBtn:$("frameSourceBtn"),
@@ -1126,6 +1127,187 @@ async function writeClipboardText(textValue){
   return ok;
 }
 
+function roundRotationNumber(value,decimals=6){
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  const p = 10 ** decimals;
+  const out = Math.round(n*p)/p;
+  return Object.is(out,-0) ? 0 : out;
+}
+
+function quaternionData(q){
+  if (!q) return null;
+  const normalized = q.clone().normalize();
+  const euler = new THREE.Euler().setFromQuaternion(normalized,"XYZ");
+  const radToDeg = THREE.MathUtils.radToDeg;
+
+  return {
+    quaternion:{
+      x:roundRotationNumber(normalized.x),
+      y:roundRotationNumber(normalized.y),
+      z:roundRotationNumber(normalized.z),
+      w:roundRotationNumber(normalized.w)
+    },
+    eulerXYZDeg:{
+      x:roundRotationNumber(radToDeg(euler.x),3),
+      y:roundRotationNumber(radToDeg(euler.y),3),
+      z:roundRotationNumber(radToDeg(euler.z),3)
+    }
+  };
+}
+
+function quaternionDelta(pose,rest){
+  if (!pose || !rest) return null;
+  return pose.clone()
+    .normalize()
+    .multiply(rest.clone().normalize().invert())
+    .normalize();
+}
+
+function captureBoneRotation(rig,bone){
+  if (!rig || !bone) return null;
+
+  const rest = rig.rest.get(bone.name);
+  const worldPosition = new THREE.Vector3();
+  const worldQ = new THREE.Quaternion();
+  const worldScale = new THREE.Vector3();
+  bone.matrixWorld.decompose(worldPosition,worldQ,worldScale);
+
+  return {
+    name:bone.name,
+    parent:bone.parent?.isBone ? bone.parent.name : null,
+    depth:rest?.depth ?? null,
+    local:quaternionData(bone.quaternion),
+    world:quaternionData(worldQ),
+    restLocal:quaternionData(rest?.quaternion),
+    restWorld:quaternionData(rest?.worldQuaternion),
+    deltaLocal:quaternionData(
+      rest?.quaternion ? quaternionDelta(bone.quaternion,rest.quaternion) : null
+    ),
+    deltaWorld:quaternionData(
+      rest?.worldQuaternion ? quaternionDelta(worldQ,rest.worldQuaternion) : null
+    )
+  };
+}
+
+function captureRigRotationFrame(rig){
+  if (!rig) return null;
+  rig.root.updateMatrixWorld(true);
+
+  return {
+    file:rig.fileName || null,
+    activeClip:rig.activeClip?.name || null,
+    currentTime:roundRotationNumber(rig.currentTime ?? state.currentTime,6),
+    root:{
+      name:rig.root?.name || "(root object)",
+      local:quaternionData(rig.root?.quaternion),
+      restLocal:quaternionData(rig.rootRest?.quaternion),
+      deltaLocal:quaternionData(
+        rig.root?.quaternion && rig.rootRest?.quaternion
+          ? quaternionDelta(rig.root.quaternion,rig.rootRest.quaternion)
+          : null
+      )
+    },
+    bones:rig.bones.map(bone => captureBoneRotation(rig,bone))
+  };
+}
+
+function captureMappedRotationPairs(){
+  const {sourcePrefix,targetPrefix} = currentPrefixes();
+
+  return state.pairs.map((pair,index) => {
+    const source = resolveBone(state.sourceRig,pair.source,sourcePrefix);
+    const targetDirect = resolveBone(state.targetRig,pair.target,targetPrefix);
+    const targetResolved = resolveRetargetTargetBone(
+      state.targetRig,
+      pair.target,
+      targetPrefix
+    );
+
+    return {
+      index:index + 1,
+      sourceRequested:pair.source,
+      sourceResolved:source?.name || null,
+      targetRequested:pair.target,
+      targetDirect:targetDirect?.name || null,
+      targetResolved:targetResolved?.name || null,
+      channels:pair.channels,
+      sourceRotation:source
+        ? captureBoneRotation(state.sourceRig,source)
+        : null,
+      targetDirectRotation:targetDirect
+        ? captureBoneRotation(state.targetRig,targetDirect)
+        : null,
+      targetResolvedRotation:targetResolved
+        ? captureBoneRotation(state.targetRig,targetResolved)
+        : null
+    };
+  });
+}
+
+function buildCurrentFrameRotationLog(){
+  // Make sure matrices correspond exactly to the visible timeline frame.
+  if (state.sourceRig){
+    setRigTime(state.sourceRig,state.currentTime);
+    state.sourceRig.root.updateMatrixWorld(true);
+  }
+  if (state.targetRig && state.retargetClip){
+    setRigTime(state.targetRig,state.currentTime);
+    state.targetRig.root.updateMatrixWorld(true);
+  }
+
+  const fps = Math.max(1,Number(els.fpsInput.value) || 30);
+
+  return {
+    tool:"Retarget to See — Current Frame Bone Rotations",
+    generatedAt:new Date().toISOString(),
+    timeline:{
+      seconds:roundRotationNumber(state.currentTime,6),
+      fps,
+      nearestFrame:Math.round(state.currentTime*fps)
+    },
+    notes:{
+      eulerOrder:"XYZ",
+      eulerUnit:"degrees",
+      quaternionOrder:"x,y,z,w",
+      deltaDefinition:"pose * inverse(rest)",
+      scope:"All Source and Target bones plus mapped-pair comparison"
+    },
+    source:captureRigRotationFrame(state.sourceRig),
+    target:captureRigRotationFrame(state.targetRig),
+    mappedPairs:captureMappedRotationPairs()
+  };
+}
+
+async function copyCurrentFrameRotations(){
+  if (!state.sourceRig && !state.targetRig){
+    setStatus("Carga al menos un rig antes de copiar las rotaciones.","error");
+    return;
+  }
+
+  const log = buildCurrentFrameRotationLog();
+  const textValue = JSON.stringify(log,null,2);
+  const ok = await writeClipboardText(textValue);
+
+  if (!ok){
+    setStatus(
+      "El navegador bloqueó el portapapeles. Haz clic dentro de la página y vuelve a intentarlo.",
+      "error"
+    );
+    return;
+  }
+
+  const old = els.copyFrameRotationsBtn.textContent;
+  els.copyFrameRotationsBtn.textContent = "Rotaciones copiadas ✓";
+  setStatus(
+    `Rotaciones del frame ${log.timeline.nearestFrame} (${log.timeline.seconds}s) copiadas. Incluye todos los huesos y comparación Source → Target.`,
+    "success"
+  );
+  setTimeout(() => {
+    els.copyFrameRotationsBtn.textContent = old;
+  },1800);
+}
+
 async function copyBoneMapDiagnostic(){
   const diagnostic = buildBoneMapDiagnostic();
   const textValue = JSON.stringify(diagnostic,null,2);
@@ -1971,6 +2153,7 @@ els.clearMapBtn.addEventListener("click",() => {
   renderMappings();updateValidCount();
 });
 els.copyBoneMapBtn.addEventListener("click",copyBoneMapDiagnostic);
+els.copyFrameRotationsBtn.addEventListener("click",copyCurrentFrameRotations);
 
 els.facePerRegion.addEventListener("change",renderFaceRegions);
 els.addIkChainBtn.addEventListener("click",() => {
