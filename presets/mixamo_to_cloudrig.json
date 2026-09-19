@@ -1,10 +1,10 @@
 {
   "name": "Mixamo → CloudRig",
   "version": 1,
-  "target_kind": "generic",
+  "target_kind": "cloudrig",
   "namespace_strip": "",
   "auto_bake_ik": false,
-  "_note": "Mixamo → CloudRig FK web preset. Root motion is decomposed for plain FBX: the Set-as-Root row (Spine→TORSO-Spine) designates the global Target root, but the web engine extracts horizontal translation + yaw from the nearest Hips/Pelvis ancestor. Hips→HIP-Spine keeps pelvis articulation and receives vertical-only location (Blender Z -> Three Y). Spine1→FK-Spine and Spine2→FK-Chest remain rotational. This mirrors common root-motion extraction practice and avoids tilting the whole character with torso bend.",
+  "_note": "Mixamo → CloudRig FK web preset. The browser engine detects the exported CloudRig hierarchy and resolves FK controls to explicit DEF section roots: UpperArm→DEF-UpperArm_1, Forearm→DEF-Forearm_1, Hand→DEF-Hand, Thigh→DEF-Thigh_1, Knee→DEF-Knee_1, Foot→DEF-Foot, Toes→DEF-Toes, plus explicit DEF torso/head aliases. Secondary _2 deform/twist bones are never targeted directly; they inherit through the native DEF chain. Cross-branch joints (hips→thigh, chest→shoulder, neck→head) can still receive virtual positional stabilization because Blender constraints are absent in FBX.",
   "ik_chains": [
     {
       "limb_kind": "ARM",
