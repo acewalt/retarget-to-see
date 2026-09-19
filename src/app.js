@@ -20,7 +20,7 @@ import {
   captureRestPosePreset,
   captureCurrentRigReference,
   serializeMap
-} from "./retarget-engine.js?v=20260919-glb-export1";
+} from "./retarget-engine.js?v=20260919-abs-camera1";
 
 const $ = id => document.getElementById(id);
 
@@ -358,19 +358,59 @@ class RigViewport{
       this.frame();
     }
   }
+  currentRenderedBox(){
+    if (!this.rig?.root) return null;
+
+    this.rig.root.updateMatrixWorld(true);
+    const box = new THREE.Box3();
+    let initialized = false;
+
+    this.rig.root.traverse(obj => {
+      if (!obj.isMesh) return;
+
+      let localBox = null;
+
+      if (obj.isSkinnedMesh && typeof obj.computeBoundingBox === "function"){
+        obj.skeleton?.update?.();
+        obj.computeBoundingBox();
+        if (obj.boundingBox && !obj.boundingBox.isEmpty()){
+          localBox = obj.boundingBox.clone();
+        }
+      } else if (obj.geometry){
+        if (!obj.geometry.boundingBox){
+          obj.geometry.computeBoundingBox?.();
+        }
+        if (obj.geometry.boundingBox && !obj.geometry.boundingBox.isEmpty()){
+          localBox = obj.geometry.boundingBox.clone();
+        }
+      }
+
+      if (!localBox) return;
+
+      const worldBox = localBox.applyMatrix4(obj.matrixWorld);
+      if (worldBox.isEmpty()) return;
+
+      if (!initialized){
+        box.copy(worldBox);
+        initialized = true;
+      } else {
+        box.union(worldBox);
+      }
+    });
+
+    return initialized ? box : null;
+  }
   frame(){
     if (!this.rig || !this.rig.bones.length) return;
     this.rig.root.updateMatrixWorld(true);
 
-    // Frame what is ACTUALLY being rendered right now. Box3 precise mode
-    // evaluates SkinnedMesh vertices in their current pose and ignores
-    // non-rendered pole/control bones. Cached rest bounds are useful for
-    // retarget scale, but not for a viewport that may currently show frame 0
-    // of an animation or an edited Target reference pose.
-    let box = new THREE.Box3().setFromObject(this.rig.root,true);
-    let initialized = !box.isEmpty();
+    // Frame the ACTUAL skinned pose. Box3.setFromObject() does not reliably
+    // apply skinning when precise=true, so use SkinnedMesh.computeBoundingBox
+    // explicitly and transform those bounds into world space.
+    let box = this.currentRenderedBox();
+    let initialized = Boolean(box && !box.isEmpty());
 
-    // Fallback only for skeleton-only FBXs with no renderable geometry.
+    // Fallback only for skeleton-only FBXs.
     if (!initialized){
       box = new THREE.Box3();
       const p = new THREE.Vector3();
@@ -395,7 +435,7 @@ class RigViewport{
 
     // Give the model deliberate breathing room. 1.25 was too tight,
     // especially with the linked cameras and crouched/sitting poses.
-    const framePadding = 1.60;
+    const framePadding = 1.85;
     const distance = radius
       / Math.tan(THREE.MathUtils.degToRad(this.camera.fov*.5))
       * framePadding;
@@ -420,26 +460,20 @@ class RigViewport{
     const distance = Math.max(offset.length(),1e-6);
     const direction = offset.multiplyScalar(1/distance);
 
-    // Keep zoom proportional to each rig's own fitted camera distance.
-    const sourceBaseDistance = Math.max(this.frameDistance || distance,1e-6);
-    const zoomRatio = distance/sourceBaseDistance;
-    const targetBaseDistance = Math.max(other.frameDistance || distance,1e-6);
+    // Mirror cameras now means REAL 1:1 camera scale: same FOV, same absolute
+    // camera distance and same absolute pan offset. Previously each viewport
+    // normalized zoom by its own fitted radius, which made it impossible to
+    // visually compare whether two FBXs actually had the same world scale.
+    const pan = this.controls.target.clone().sub(this.frameCenter);
 
-    // Mirror panning proportionally to each rig's framing radius instead of
-    // copying an absolute translation (the characters can have very
-    // different dimensions/origins).
-    const sourceRadius = Math.max(this.frameRadius || 1,1e-6);
-    const targetRadius = Math.max(other.frameRadius || 1,1e-6);
-    const pan = this.controls.target.clone()
-      .sub(this.frameCenter)
-      .multiplyScalar(targetRadius/sourceRadius);
-
+    other.camera.fov = this.camera.fov;
+    other.camera.updateProjectionMatrix();
     other.controls.target.copy(other.frameCenter).add(pan);
     other.camera.position.copy(other.controls.target)
-      .addScaledVector(direction,targetBaseDistance*zoomRatio);
+      .addScaledVector(direction,distance);
 
-    other.camera.near = Math.max(.001,(targetBaseDistance*zoomRatio)/1000);
-    other.camera.far = Math.max(1000,targetBaseDistance*zoomRatio*20);
+    other.camera.near = Math.max(.001,distance/1000);
+    other.camera.far = Math.max(1000,distance*20);
     other.camera.updateProjectionMatrix();
     other.controls.update();
   }
@@ -931,7 +965,11 @@ async function loadFbx(file,kind){
     if (state.sourceClip) activateClip(rig,state.sourceClip);
     sourceView.setRig(rig);
 
-    els.sourceMeta.textContent = `${file.name} · ${rig.bones.length} huesos · ${rig.animations.length} clips${rig.visualRest?.valid ? ` · bounds ${rig.visualRest.skinnedMeshCount || 0} skinned` : ""}`;
+    {
+      const b = sourceView.currentRenderedBox();
+      const sz = b?.getSize(new THREE.Vector3());
+      els.sourceMeta.textContent = `${file.name} · ${rig.bones.length} huesos · ${rig.animations.length} clips${rig.visualRest?.valid ? ` · bounds ${rig.visualRest.skinnedMeshCount || 0} skinned` : ""}${sz ? ` · visual H ${sz.y.toFixed(3)}` : ""}`;
+    }
   } else {
     state.targetRig = rig;
     state.retargetClip = null;
@@ -955,7 +993,11 @@ async function loadFbx(file,kind){
       ? ` · ${rig.weightedBoneNames.size} deform reales`
       : "";
     const profileInfo = rig.cloudRigProfile ? " · CloudRig DEF profile" : "";
-    els.targetMeta.textContent = `${file.name} · ${rig.bones.length} huesos${weightedInfo}${profileInfo}${ignored}${rig.visualRest?.valid ? ` · bounds ${rig.visualRest.skinnedMeshCount || 0} skinned` : ""}`;
+    {
+      const b = targetView.currentRenderedBox();
+      const sz = b?.getSize(new THREE.Vector3());
+      els.targetMeta.textContent = `${file.name} · ${rig.bones.length} huesos${weightedInfo}${profileInfo}${ignored}${rig.visualRest?.valid ? ` · bounds ${rig.visualRest.skinnedMeshCount || 0} skinned` : ""}${sz ? ` · visual H ${sz.y.toFixed(3)}` : ""}`;
+    }
     els.exportGlbBtn.disabled = true;
     els.exportClipBtn.disabled = true;
     els.convertIkBtn.disabled = true;
