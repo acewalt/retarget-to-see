@@ -1514,6 +1514,65 @@ export async function bakeRetarget(options){
     if (pairHasLocation(r)) locationTargets.add(r.targetBone.name);
   }
 
+  // Build a virtual anatomical hierarchy from the SOURCE mappings. Exported
+  // control rigs often do not preserve their Blender constraint hierarchy in
+  // FBX: e.g. DEF-Head can live under a static STR/P-STR branch instead of
+  // following DEF-Neck directly. Rotations alone then look close, but joints
+  // appear to "disconnect". We compensate by keying mapped deform positions
+  // so every mapped child follows the nearest mapped source ancestor.
+  const sourceToTarget = new Map();
+  const sourceRecordByName = new Map();
+  for (const r of boneRecords){
+    if (!r.sourceBone || !r.targetBone || !pairHasRotation(r)) continue;
+    if (!sourceToTarget.has(r.sourceBone.name)){
+      sourceToTarget.set(r.sourceBone.name,r.targetBone.name);
+      sourceRecordByName.set(r.sourceBone.name,r);
+    }
+  }
+
+  const virtualParentByTarget = new Map();
+  const virtualRestOffsetByTarget = new Map();
+  const virtualSourceDepthByTarget = new Map();
+
+  for (const r of sourceRecordByName.values()){
+    const childTarget = r.targetBone.name;
+    let parent = r.sourceBone.parent;
+    let parentTarget = null;
+
+    while (parent?.isBone){
+      const candidate = sourceToTarget.get(parent.name);
+      if (candidate && candidate !== childTarget){
+        parentTarget = candidate;
+        break;
+      }
+      parent = parent.parent;
+    }
+
+    if (!parentTarget) continue;
+    const childRest = targetRig.rest.get(childTarget);
+    const parentRest = targetRig.rest.get(parentTarget);
+    if (!childRest || !parentRest) continue;
+
+    virtualParentByTarget.set(childTarget,parentTarget);
+    virtualRestOffsetByTarget.set(
+      childTarget,
+      childRest.worldPosition.clone().sub(parentRest.worldPosition)
+    );
+    virtualSourceDepthByTarget.set(
+      childTarget,
+      sourceRest.get(r.sourceBone.name)?.depth ?? 0
+    );
+
+    // Position tracks are required even when the original map was ROT-only:
+    // they emulate the missing Blender constraints/parenting in the FBX.
+    locationTargets.add(childTarget);
+  }
+
+  const virtualTargets = [...virtualParentByTarget.keys()].sort(
+    (a,b) => (virtualSourceDepthByTarget.get(a) ?? 0)
+      - (virtualSourceDepthByTarget.get(b) ?? 0)
+  );
+
   const sortedBones = [...targetRig.bones].sort((a,b) =>
     targetRig.rest.get(a.name).depth - targetRig.rest.get(b.name).depth
   );
@@ -1741,6 +1800,45 @@ export async function bakeRetarget(options){
       worldOut.set(bone.name,buildWorldFromLocal(parentWorld,localPos,localQuat,localScale));
     }
 
+    // PASS 1B: virtual-chain positional stabilization.
+    // Preserve each Target's own rest proportions, but make mapped children
+    // follow the mapped anatomical parent rather than a static CloudRig
+    // control/STR branch left behind by FBX export.
+    for (const childName of virtualTargets){
+      const parentName = virtualParentByTarget.get(childName);
+      const childBone = targetRig.boneMap.get(childName);
+      const childRest = targetRig.rest.get(childName);
+      const parentRest = targetRig.rest.get(parentName);
+      const parentDesiredWorld = worldOut.get(parentName);
+      const childState = localState.get(childName);
+      if (!childBone || !childRest || !parentRest || !parentDesiredWorld || !childState) continue;
+
+      const parentPos = new THREE.Vector3();
+      const parentQ = new THREE.Quaternion();
+      const parentScale = new THREE.Vector3();
+      parentDesiredWorld.decompose(parentPos,parentQ,parentScale);
+
+      const parentDeltaQ = parentQ.clone()
+        .multiply(parentRest.worldQuaternion.clone().invert())
+        .normalize();
+
+      const restOffset = virtualRestOffsetByTarget.get(childName).clone();
+      const desiredWorldPos = parentPos.add(restOffset.applyQuaternion(parentDeltaQ));
+
+      const actualParentWorld = parentWorldForBone(childBone,worldOut,childRest);
+      childState.position.copy(vectorToLocal(actualParentWorld,desiredWorldPos));
+
+      worldOut.set(
+        childName,
+        buildWorldFromLocal(
+          actualParentWorld,
+          childState.position,
+          childState.quaternion,
+          childState.scale
+        )
+      );
+    }
+
     // PASS 2: HEAD_LOCAL rows. These intentionally bypass the target's
     // semantic parent chain and land the control at a head-relative point.
     if (srcHeadBone && tgtHeadBone && srcHeadRestInv && tgtHeadRestInv){
@@ -1853,6 +1951,8 @@ export async function bakeRetarget(options){
     pelvisTranslationRedirectedToRoot:rootLocationRecords.some(
       r => r._pelvis_translation_to_root
     ),
+    virtualChainStabilizedTargets:virtualTargets,
+    virtualChainStabilizedCount:virtualTargets.length,
     splitRootMappings:[...new Set(records
       .filter(r => r._rotation_only || r._location_only)
       .map(r => r.pairIndex))]
