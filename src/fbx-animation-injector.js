@@ -564,6 +564,189 @@ function cloneConnectionWithRemap(
   return clone;
 }
 
+
+function bytesEqual(a,b){
+  if (a === b) return true;
+  if (!(a instanceof Uint8Array) || !(b instanceof Uint8Array)) return false;
+  if (a.length !== b.length) return false;
+  for (let i=0;i<a.length;i++){
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+function propSemanticEqual(a,b){
+  if (!a || !b || a.type !== b.type) return false;
+
+  // For untouched FBX properties, raw bytes are the strongest comparison:
+  // this includes compressed Indexes/Weights arrays without having to
+  // decompress them.
+  if (a.raw instanceof Uint8Array && b.raw instanceof Uint8Array){
+    return bytesEqual(a.raw,b.raw);
+  }
+
+  if (a.value instanceof Uint8Array || b.value instanceof Uint8Array){
+    return bytesEqual(a.value,b.value);
+  }
+
+  if (
+    a.value && typeof a.value === "object"
+    && b.value && typeof b.value === "object"
+  ){
+    return (
+      a.value.length === b.value.length
+      && a.value.encoding === b.value.encoding
+      && a.value.compressedLength === b.value.compressedLength
+    );
+  }
+
+  return String(a.value) === String(b.value);
+}
+
+function assertSameNodeSemantic(a,b,path=""){
+  const here = path ? path + "/" + a?.name : String(a?.name || "");
+
+  if (!a || !b){
+    throw new Error("Integridad FBX: nodo ausente en " + here + ".");
+  }
+  if (a.name !== b.name){
+    throw new Error(
+      "Integridad FBX: nombre de nodo cambió en " + here
+      + ": " + a.name + " vs " + b.name + "."
+    );
+  }
+  if (a.props.length !== b.props.length){
+    throw new Error(
+      "Integridad FBX: propiedades cambiaron en " + here + "."
+    );
+  }
+  for (let i=0;i<a.props.length;i++){
+    if (!propSemanticEqual(a.props[i],b.props[i])){
+      throw new Error(
+        "Integridad FBX: propiedad " + i + " cambió en " + here + "."
+      );
+    }
+  }
+  if (a.children.length !== b.children.length){
+    throw new Error(
+      "Integridad FBX: hijos cambiaron en " + here
+      + " (" + a.children.length + " vs " + b.children.length + ")."
+    );
+  }
+  for (let i=0;i<a.children.length;i++){
+    assertSameNodeSemantic(a.children[i],b.children[i],here);
+  }
+}
+
+function objectSemanticKey(node){
+  const id = nodeObjectId(node);
+  return node.name + "|" + (id == null ? "none" : id.toString());
+}
+
+function countOriginalRigStructure(doc){
+  const objects = rootNode(doc,"Objects");
+  if (!objects){
+    throw new Error("FBX sin Objects.");
+  }
+
+  let models = 0;
+  let limbNodes = 0;
+  let meshes = 0;
+  let geometries = 0;
+  let skins = 0;
+  let clusters = 0;
+  let weightedClusters = 0;
+
+  for (const node of objects.children){
+    if (node.name === "Model"){
+      models++;
+      const subtype = cleanObjectName(node.props?.[2]?.value);
+      if (subtype === "LimbNode") limbNodes++;
+      if (subtype === "Mesh") meshes++;
+    } else if (node.name === "Geometry"){
+      geometries++;
+    } else if (node.name === "Deformer"){
+      const subtype = cleanObjectName(node.props?.[2]?.value);
+      if (subtype === "Skin"){
+        skins++;
+      } else if (subtype === "Cluster"){
+        clusters++;
+        const indexes = node.children.find(c => c.name === "Indexes");
+        const len = Number(indexes?.props?.[0]?.value?.length || 0);
+        if (len > 0) weightedClusters++;
+      }
+    }
+  }
+
+  return {
+    models,limbNodes,meshes,geometries,
+    skins,clusters,weightedClusters
+  };
+}
+
+function assertOriginalPayloadPreserved(original,output){
+  const originalObjects = rootNode(original,"Objects");
+  const outputObjects = rootNode(output,"Objects");
+  const originalConnections = rootNode(original,"Connections");
+  const outputConnections = rootNode(output,"Connections");
+
+  if (!originalObjects || !outputObjects){
+    throw new Error("Integridad FBX: Objects ausente.");
+  }
+  if (!originalConnections || !outputConnections){
+    throw new Error("Integridad FBX: Connections ausente.");
+  }
+
+  // Every non-animation object from the uploaded Target must survive
+  // byte-for-byte at property level. This covers the real armature Models,
+  // Geometry, Skin, Clusters, Indexes/Weights, bind Transform matrices, Pose,
+  // materials and textures.
+  const outByKey = new Map();
+  for (const node of outputObjects.children){
+    if (ANIM_TYPES.has(node.name)) continue;
+    outByKey.set(objectSemanticKey(node),node);
+  }
+
+  for (const originalNode of originalObjects.children){
+    if (ANIM_TYPES.has(originalNode.name)) continue;
+    const key = objectSemanticKey(originalNode);
+    const outputNode = outByKey.get(key);
+    if (!outputNode){
+      throw new Error(
+        "Integridad FBX: desapareció objeto original " + key + "."
+      );
+    }
+    assertSameNodeSemantic(originalNode,outputNode,"Objects");
+  }
+
+  // Existing Target connections are kept in the same order and animation
+  // connections are appended after them.
+  if (outputConnections.children.length < originalConnections.children.length){
+    throw new Error("Integridad FBX: faltan Connections originales.");
+  }
+  for (let i=0;i<originalConnections.children.length;i++){
+    assertSameNodeSemantic(
+      originalConnections.children[i],
+      outputConnections.children[i],
+      "Connections"
+    );
+  }
+
+  const before = countOriginalRigStructure(original);
+  const after = countOriginalRigStructure(output);
+
+  for (const key of Object.keys(before)){
+    if (before[key] !== after[key]){
+      throw new Error(
+        "Integridad FBX: " + key + " cambió de "
+        + before[key] + " a " + after[key] + "."
+      );
+    }
+  }
+
+  return before;
+}
+
 export function injectAnimationIntoOriginalFbx(
   originalBytes,
   donorBytes,
@@ -669,6 +852,9 @@ export function injectAnimationIntoOriginalFbx(
     throw new Error("Validación FBX falló después de inyectar la Action.");
   }
 
+  // Hard gate: never download if the user's original rig/mesh/weights changed.
+  const integrity = assertOriginalPayloadPreserved(original,verify);
+
   return {
     bytes:output,
     diagnostics:{
@@ -678,7 +864,8 @@ export function injectAnimationIntoOriginalFbx(
       donorConnections:clonedConnections.length,
       mappedTargets:[...mappedTargets].sort(),
       outputBytes:output.byteLength,
-      fbxVersion:original.version
+      fbxVersion:original.version,
+      integrity
     }
   };
 }
