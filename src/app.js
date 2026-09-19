@@ -19,7 +19,7 @@ import {
   previewRestPosePreset,
   captureRestPosePreset,
   serializeMap
-} from "./retarget-engine.js?v=20260919-mixamo-helper-posespace1";
+} from "./retarget-engine.js?v=20260919-foot-contact-lock1";
 
 const $ = id => document.getElementById(id);
 
