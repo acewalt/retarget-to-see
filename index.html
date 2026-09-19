@@ -297,10 +297,10 @@
           <button id="exportClipBtn" class="ghost" type="button" disabled>JSON técnico</button>
         </div>
         <button id="exportOriginalRigBtn" class="primary big" type="button" disabled>
-          FBX EXACTO · Target original
+          FBX EXACTO · mismo Target + Action
         </button>
         <p class="hint">
-          FBX EXACTO no reconstruye el rig: toma los bytes del Target que cargaste y les inyecta únicamente la Action horneada sobre FK-*, HIP-Spine, TORSO-Spine y root. Por eso conserva exactamente el esqueleto, rest pose, jerarquía, skin, malla y unidades del FBX Target. GLB queda sólo como preview deform-only porque glTF no puede conservar un CloudRig de Blender 1:1.
+          FBX EXACTO no reconstruye el rig: toma los bytes del Target cargado y sólo añade la Action sobre FK-*, HIP-Spine, TORSO-Spine y root. Antes de descargar ahora compara y bloquea la salida si cambia cualquier Model, Geometry, Skin, Cluster, Indexes/Weights o conexión original. Para comprobarlo en Blender impórtalo en una ESCENA VACÍA: si lo importas junto a tu RIG-Sintel existente, Blender necesariamente crea RIG-Sintel.001/.002 por conflicto de nombres; eso no significa que el FBX contenga dos armatures. GLB queda sólo como preview deform-only.
         </p>
         <div class="progress-wrap" id="progressWrap" hidden>
           <div class="progress-track"><div id="progressBar"></div></div>
@@ -320,6 +320,6 @@
     Port web del retargeting inspirado en <a href="https://github.com/Arcomade/BlendCap" target="_blank" rel="noreferrer">BlendCap</a> · GPL-3.0 · sin garantía.
   </footer>
 
-  <script type="module" src="./src/app.js?v=20260919-exact-fbx2"></script>
+  <script type="module" src="./src/app.js?v=20260919-integrity1"></script>
 </body>
 </html>
