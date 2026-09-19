@@ -1771,10 +1771,14 @@ export async function bakeRetarget(options){
           ctrlPole:`Ctrl_LegPole_IK_${side}`,
           footTarget:`Foot_IK_target_${side}`,
           sourceFootRest:sEndRest?.worldPosition.clone() || null,
+          sourceFootRestMatrix:sEndRest?.world.clone() || null,
           sourceKneeRest:sMidRest?.worldPosition.clone() || null,
+          sourceKneeRestMatrix:sMidRest?.world.clone() || null,
           sourceHipsRest:sHipsRest?.worldPosition.clone() || null,
           targetFootRest:tEndRest?.worldPosition.clone() || null,
-          targetKneeRest:tMidRest?.worldPosition.clone() || null
+          targetFootRestMatrix:tEndRest?.world.clone() || null,
+          targetKneeRest:tMidRest?.worldPosition.clone() || null,
+          targetKneeRestMatrix:tMidRest?.world.clone() || null
         }
       });
     }
@@ -1958,6 +1962,24 @@ export async function bakeRetarget(options){
       ? rootDeltaQ.clone().invert()
       : null;
 
+    const rootRestScale = targetRig.rootRest?.scale.clone()
+      || targetRig.root.scale.clone();
+    const rootRestQuat = targetRig.rootRest?.quaternion.clone()
+      || targetRig.root.quaternion.clone();
+    const targetRootRestMatrix = new THREE.Matrix4().compose(
+      targetRootRestPos.clone(),
+      rootRestQuat,
+      rootRestScale
+    );
+    const targetRootCurrentMatrix = new THREE.Matrix4().compose(
+      rootLocalPos.clone(),
+      rootLocalQuat.clone(),
+      rootRestScale
+    );
+    const targetRootDeltaMatrix = targetRootCurrentMatrix.clone()
+      .multiply(targetRootRestMatrix.clone().invert());
+    const targetRootDeltaInvMatrix = targetRootDeltaMatrix.clone().invert();
+
     // PASS 1: rest locals + regular BASIS/WORLD location + world-delta rotation.
     for (const bone of sortedBones){
       const rest = targetRig.rest.get(bone.name);
@@ -2131,34 +2153,96 @@ export async function bakeRetarget(options){
         chain.kind === "LEG"
         && useMixamoHelperRig
         && targetRig.cloudRigProfile
-        && chain.helperRig?.sourceFootRest
-        && chain.helperRig?.targetFootRest
+        && chain.helperRig?.sourceFootRestMatrix
+        && chain.helperRig?.targetFootRestMatrix
       ){
-        // Port of the useful part of the Blender Mixamo control rig:
-        // a virtual Ctrl_Foot_IK follows the Source foot's WORLD trajectory,
-        // while Ctrl_Master/Ctrl_Hips carry global locomotion. We therefore
-        // subtract the Target root motion from the foot trajectory before
-        // solving the DEF leg. This keeps planted feet planted even when the
-        // character proportions differ.
-        const footDelta = srcC.clone()
-          .sub(chain.helperRig.sourceFootRest)
-          .multiplyScalar(locationScale);
+        // Exact helper-bone idea from the Blender Mixamo Rig add-on:
+        //
+        // helper_pose = source_foot_pose
+        //             * inverse(source_foot_rest)
+        //             * target_helper_rest
+        //
+        // The earlier web approximation copied only translation deltas. That
+        // is not equivalent: a world-space bone delta contains translation
+        // induced by rotation around the armature origin as well. With
+        // different proportions that error shows up as the feet drifting
+        // forward/backward even while the Source foot is planted.
+        //
+        // Scale the Source armature in pose-space first (equivalent to the
+        // add-on applying the Source armature scale), then remove the root
+        // motion already carried by the Target object.
+        const one = new THREE.Vector3(1,1,1);
+        const footPoseP = new THREE.Vector3();
+        const footPoseQ = new THREE.Quaternion();
+        const footPoseS = new THREE.Vector3();
+        chain.sEnd.matrixWorld.decompose(footPoseP,footPoseQ,footPoseS);
 
-        if (rootDeltaInv) footDelta.applyQuaternion(rootDeltaInv);
+        const footRestP = new THREE.Vector3();
+        const footRestQ = new THREE.Quaternion();
+        const footRestS = new THREE.Vector3();
+        chain.helperRig.sourceFootRestMatrix.decompose(
+          footRestP,footRestQ,footRestS
+        );
 
-        desiredC = chain.helperRig.targetFootRest.clone()
-          .add(footDelta)
-          .sub(targetRootMotionDelta);
+        footPoseP.multiplyScalar(locationScale);
+        footRestP.multiplyScalar(locationScale);
 
-        if (chain.helperRig.sourceKneeRest && chain.helperRig.targetKneeRest){
-          const kneeDelta = srcB.clone()
-            .sub(chain.helperRig.sourceKneeRest)
-            .multiplyScalar(locationScale);
-          if (rootDeltaInv) kneeDelta.applyQuaternion(rootDeltaInv);
+        const sourceFootPoseScaled = new THREE.Matrix4().compose(
+          footPoseP,footPoseQ,one
+        );
+        const sourceFootRestScaled = new THREE.Matrix4().compose(
+          footRestP,footRestQ,one
+        );
+        const sourceFootDeltaMatrix = sourceFootPoseScaled.clone()
+          .multiply(sourceFootRestScaled.clone().invert());
 
-          helperPoleReference = chain.helperRig.targetKneeRest.clone()
-            .add(kneeDelta)
-            .sub(targetRootMotionDelta);
+        const helperFootDeltaInTargetRoot = targetRootDeltaInvMatrix.clone()
+          .multiply(sourceFootDeltaMatrix);
+
+        const desiredFootMatrix = helperFootDeltaInTargetRoot.clone()
+          .multiply(chain.helperRig.targetFootRestMatrix);
+
+        desiredC = new THREE.Vector3().setFromMatrixPosition(
+          desiredFootMatrix
+        );
+
+        if (
+          chain.helperRig.sourceKneeRestMatrix
+          && chain.helperRig.targetKneeRestMatrix
+        ){
+          const kneePoseP = new THREE.Vector3();
+          const kneePoseQ = new THREE.Quaternion();
+          const kneePoseS = new THREE.Vector3();
+          chain.sMid.matrixWorld.decompose(kneePoseP,kneePoseQ,kneePoseS);
+
+          const kneeRestP = new THREE.Vector3();
+          const kneeRestQ = new THREE.Quaternion();
+          const kneeRestS = new THREE.Vector3();
+          chain.helperRig.sourceKneeRestMatrix.decompose(
+            kneeRestP,kneeRestQ,kneeRestS
+          );
+
+          kneePoseP.multiplyScalar(locationScale);
+          kneeRestP.multiplyScalar(locationScale);
+
+          const sourceKneePoseScaled = new THREE.Matrix4().compose(
+            kneePoseP,kneePoseQ,one
+          );
+          const sourceKneeRestScaled = new THREE.Matrix4().compose(
+            kneeRestP,kneeRestQ,one
+          );
+          const sourceKneeDeltaMatrix = sourceKneePoseScaled.clone()
+            .multiply(sourceKneeRestScaled.clone().invert());
+
+          const helperKneeDeltaInTargetRoot = targetRootDeltaInvMatrix.clone()
+            .multiply(sourceKneeDeltaMatrix);
+
+          const desiredKneeMatrix = helperKneeDeltaInTargetRoot.clone()
+            .multiply(chain.helperRig.targetKneeRestMatrix);
+
+          helperPoleReference = new THREE.Vector3().setFromMatrixPosition(
+            desiredKneeMatrix
+          );
         }
       } else {
         desiredC = A.clone().add(srcAC.multiplyScalar(chain.reachScale));
@@ -2427,7 +2511,7 @@ export async function bakeRetarget(options){
       footTarget:c.helperRig.footTarget
     }) : null).filter(Boolean),
     footCorrectionMode:(useMixamoHelperRig && targetRig.cloudRigProfile)
-      ? "mixamo-helper-foot-ik"
+      ? "mixamo-helper-pose-matrix"
       : "direct-two-bone",
     footEndEffectorCorrection:Boolean(correctFeet),
     footEndEffectorChains:footCorrectionChains.map(c => ({
