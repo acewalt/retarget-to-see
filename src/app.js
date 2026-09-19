@@ -19,7 +19,7 @@ import {
   previewRestPosePreset,
   captureRestPosePreset,
   serializeMap
-} from "./retarget-engine.js?v=20260919-arm-posthierarchy1";
+} from "./retarget-engine.js?v=20260919-leftforearm-fk1";
 
 const $ = id => document.getElementById(id);
 
@@ -1667,7 +1667,7 @@ async function applyRetarget(){
       includeRestLocationScale:els.includeRestLocScale.checked,
       sourceRestTime:restTime,
       useWorldLocation:els.useWorldLocation.checked,
-      correctHands:state.targetRig?.cloudRigProfile ? true : els.correctHands.checked,
+      correctHands:els.correctHands.checked,
       correctFeet:els.correctFeet.checked,
       headSource:els.headSource.value,
       headTarget:els.headTarget.value,
@@ -1709,6 +1709,9 @@ async function applyRetarget(){
     const footCorrectionText = result.footEndEffectorCorrection
       ? ` Corrección de pies activa: ${result.footEndEffectorChains.length} piernas, solo rotación 2-bone.`
       : "";
+    const fkMirrorText = result.fkControlMirrorCount
+      ? ` FK controls copiados: ${result.fkControlMirrorCount} (${result.fkControlMirrorTargets.slice(0,8).join(", ")}${result.fkControlMirrorTargets.length > 8 ? "…" : ""}).`
+      : "";
     const splitRootText = result.splitRootMappings?.length
       ? ` Set-as-Root separado: ${result.splitRootMappings.join("; ")} (ROT al deform, LOC al objeto).`
       : "";
@@ -1717,7 +1720,7 @@ async function applyRetarget(){
           .map(x => `${x.sources.join("+")}→${x.target}`)
           .join("; ")}.`
       : "";
-    let message = `Retarget FK terminado: ${result.validPairs}/${result.totalPairs} pares, cuerpo ${coverage.coreValid}/${coverage.coreTotal}, dedos ${coverage.fingerValid}/${coverage.fingerTotal}, ${result.frameCount} frames, scale ${result.locationScale.toFixed(4)}${scaleMethod}.${rootMotionText}${rootRotationText}${rootTranslationText}${pelvisSafetyText}${virtualChainText}${naturalHierarchyText}${handCorrectionText}${footCorrectionText}${splitRootText}${collapsedText}${redirectedText}${unresolvedText}`;
+    let message = `Retarget FK terminado: ${result.validPairs}/${result.totalPairs} pares, cuerpo ${coverage.coreValid}/${coverage.coreTotal}, dedos ${coverage.fingerValid}/${coverage.fingerTotal}, ${result.frameCount} frames, scale ${result.locationScale.toFixed(4)}${scaleMethod}.${rootMotionText}${rootRotationText}${rootTranslationText}${pelvisSafetyText}${virtualChainText}${naturalHierarchyText}${handCorrectionText}${footCorrectionText}${fkMirrorText}${splitRootText}${collapsedText}${redirectedText}${unresolvedText}`;
 
     if (els.autoBakeIk.checked && state.ikChains.length){
       try{
