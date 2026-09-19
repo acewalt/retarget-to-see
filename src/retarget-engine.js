@@ -1790,6 +1790,54 @@ export async function bakeRetarget(options){
     ...footCorrectionChains
   ];
 
+  // The useful behavior of the Blender Mixamo helper rig is not "copy the
+  // full foot matrix into another proportioned character". That over-constrains
+  // the leg and was why the Target stood up while the Source was still seated.
+  // What matters is the Foot IK contact target: when a Source foot is planted,
+  // keep the Target end-effector fixed in WORLD while root/hips move.
+  //
+  // Pre-sample Source foot trajectories and detect planted intervals.
+  if (correctFeet && useMixamoHelperRig && targetRig.cloudRigProfile){
+    for (const chain of footCorrectionChains){
+      const positions=[];
+      for (let i=0;i<frameCount;i++){
+        setRigTime(sourceRig,times[i]);
+        sourceRig.root.updateMatrixWorld(true);
+        positions.push(
+          new THREE.Vector3().setFromMatrixPosition(chain.sEnd.matrixWorld)
+        );
+      }
+
+      const minY=Math.min(...positions.map(p=>p.y));
+      const reach=Math.max(EPS,chain.sourceUpperLen+chain.sourceForeLen);
+      const contacts=new Array(frameCount).fill(false);
+
+      for (let i=0;i<frameCount;i++){
+        const a=positions[Math.max(0,i-1)];
+        const b=positions[Math.min(frameCount-1,i+1)];
+        const dt=Math.max(step,(times[Math.min(frameCount-1,i+1)]-times[Math.max(0,i-1)]));
+        const speed=a.distanceTo(b)/dt;
+        const speedNorm=speed/reach;
+        const heightNorm=(positions[i].y-minY)/reach;
+
+        // Generous enough for mocap jitter, strict enough to release on steps.
+        contacts[i]=speedNorm < 0.30 && heightNorm < 0.12;
+      }
+
+      // Remove isolated one-frame contact losses caused by sampling jitter.
+      for (let i=1;i<frameCount-1;i++){
+        if (!contacts[i] && contacts[i-1] && contacts[i+1]) contacts[i]=true;
+      }
+
+      chain.sourceFootPositions=positions;
+      chain.contactByFrame=contacts;
+      chain.contactAnchorWorld=null;
+      chain.contactFrames=contacts.reduce((n,v)=>n+(v?1:0),0);
+    }
+
+    setRigTime(sourceRig,0);
+  }
+
   const sortedBones = [...targetRig.bones].sort((a,b) =>
     targetRig.rest.get(a.name).depth - targetRig.rest.get(b.name).depth
   );
@@ -2144,132 +2192,37 @@ export async function bakeRetarget(options){
       if (srcAC.lengthSq() < EPS || srcAB.lengthSq() < EPS) continue;
 
       let helperPoleReference = null;
-      let desiredC;
+
+      // Start from the direct two-bone retarget that already preserves the
+      // seated/standing pose correctly.
+      let desiredC = A.clone().add(
+        srcAC.clone().multiplyScalar(chain.reachScale)
+      );
 
       if (
         chain.kind === "LEG"
         && useMixamoHelperRig
         && targetRig.cloudRigProfile
-        && chain.helperRig?.sourceFootRestMatrix
-        && chain.helperRig?.targetFootRestMatrix
+        && chain.contactByFrame
       ){
-        // Blender's COPY_LOCATION for Foot_IK is POSE-space, not world
-        // space. The helper bone is created inside the SOURCE armature using
-        // the TARGET control's edit-bone matrix, then parented to the Mixamo
-        // foot. Therefore the correct web equivalent is:
-        //
-        // sourceDeltaPose =
-        //   sourceFootPoseInArmature
-        //   * inverse(sourceFootRestInArmature)
-        //
-        // helperPoseInTargetArmature =
-        //   scaled(sourceDeltaPose)
-        //   * targetFootRestInTargetArmature
-        //
-        // Our Target root object carries Mixamo Hips locomotion externally,
-        // unlike Blender where Hips remains a pose bone. Counter-transform
-        // that object motion so the helper still behaves like a POSE-space
-        // Foot_IK control and planted feet do not get dragged by the root.
-        const one = new THREE.Vector3(1,1,1);
+        const planted=Boolean(chain.contactByFrame[frame]);
 
-        const sourceRootPoseWorld = sourceRig.root.matrixWorld.clone();
-        const sourceRootRestWorld = sourceRig.rootWorldRest?.clone()
-          || sourceRootPoseWorld.clone();
-        const targetRootRestWorld = targetRig.rootWorldRest?.clone()
-          || targetRig.root.matrixWorld.clone();
+        if (planted){
+          // On contact start, capture the Target foot where the normal
+          // retarget put it. Store that point in animated WORLD space.
+          if (!chain.contactAnchorWorld){
+            chain.contactAnchorWorld=desiredC.clone()
+              .applyMatrix4(targetRootDeltaMatrix);
+          }
 
-        const sourcePoseToArm = sourceRootPoseWorld.clone().invert();
-        const sourceRestToArm = sourceRootRestWorld.clone().invert();
-        const targetRestToArm = targetRootRestWorld.clone().invert();
-
-        const sourceFootPoseArm = sourcePoseToArm.clone()
-          .multiply(chain.sEnd.matrixWorld);
-        const sourceFootRestArm = sourceRestToArm.clone()
-          .multiply(chain.helperRig.sourceFootRestMatrix);
-
-        let sourceFootDeltaArm = sourceFootPoseArm.clone()
-          .multiply(sourceFootRestArm.clone().invert());
-
-        // Equivalent to applying Source armature scale before retargeting:
-        // only the delta translation needs the Source→Target size factor.
-        const deltaP = new THREE.Vector3();
-        const deltaQ = new THREE.Quaternion();
-        const deltaS = new THREE.Vector3();
-        sourceFootDeltaArm.decompose(deltaP,deltaQ,deltaS);
-        deltaP.multiplyScalar(locationScale);
-        sourceFootDeltaArm = new THREE.Matrix4().compose(
-          deltaP,deltaQ,one
-        );
-
-        const targetFootRestArm = targetRestToArm.clone()
-          .multiply(chain.helperRig.targetFootRestMatrix);
-        const helperFootPoseArm = sourceFootDeltaArm.clone()
-          .multiply(targetFootRestArm);
-
-        // Build the Target root CURRENT world transform for this baked frame.
-        const rootParentWorld = targetRig.root.parent?.matrixWorld?.clone()
-          || new THREE.Matrix4();
-        const targetRootCurrentLocal = new THREE.Matrix4().compose(
-          rootLocalPos.clone(),
-          rootLocalQuat.clone(),
-          rootRestScale.clone()
-        );
-        const targetRootCurrentWorld = rootParentWorld.clone()
-          .multiply(targetRootCurrentLocal);
-
-        // The solver's worldOut lives in the Target REST-world frame. Convert
-        // the desired helper pose from final-current-root coordinates back
-        // into that static frame:
-        // R0 * inverse(Rt) * R0 * helperPoseArm
-        const helperFootWorldAtRest = targetRootRestWorld.clone()
-          .multiply(helperFootPoseArm);
-        const desiredFootStaticWorld = targetRootRestWorld.clone()
-          .multiply(targetRootCurrentWorld.clone().invert())
-          .multiply(helperFootWorldAtRest);
-
-        desiredC = new THREE.Vector3().setFromMatrixPosition(
-          desiredFootStaticWorld
-        );
-
-        if (
-          chain.helperRig.sourceKneeRestMatrix
-          && chain.helperRig.targetKneeRestMatrix
-        ){
-          const sourceKneePoseArm = sourcePoseToArm.clone()
-            .multiply(chain.sMid.matrixWorld);
-          const sourceKneeRestArm = sourceRestToArm.clone()
-            .multiply(chain.helperRig.sourceKneeRestMatrix);
-
-          let sourceKneeDeltaArm = sourceKneePoseArm.clone()
-            .multiply(sourceKneeRestArm.clone().invert());
-
-          const kneeDeltaP = new THREE.Vector3();
-          const kneeDeltaQ = new THREE.Quaternion();
-          const kneeDeltaS = new THREE.Vector3();
-          sourceKneeDeltaArm.decompose(
-            kneeDeltaP,kneeDeltaQ,kneeDeltaS
-          );
-          kneeDeltaP.multiplyScalar(locationScale);
-          sourceKneeDeltaArm = new THREE.Matrix4().compose(
-            kneeDeltaP,kneeDeltaQ,one
-          );
-
-          const targetKneeRestArm = targetRestToArm.clone()
-            .multiply(chain.helperRig.targetKneeRestMatrix);
-          const helperKneePoseArm = sourceKneeDeltaArm.clone()
-            .multiply(targetKneeRestArm);
-          const helperKneeWorldAtRest = targetRootRestWorld.clone()
-            .multiply(helperKneePoseArm);
-          const desiredKneeStaticWorld = targetRootRestWorld.clone()
-            .multiply(targetRootCurrentWorld.clone().invert())
-            .multiply(helperKneeWorldAtRest);
-
-          helperPoleReference = new THREE.Vector3().setFromMatrixPosition(
-            desiredKneeStaticWorld
-          );
+          // Convert the fixed WORLD anchor back into the current root-local
+          // solve space. As Ctrl_Master/Ctrl_Hips move, the leg compensates
+          // so the shoe remains planted instead of being dragged along.
+          desiredC=chain.contactAnchorWorld.clone()
+            .applyMatrix4(targetRootDeltaInvMatrix);
+        } else {
+          chain.contactAnchorWorld=null;
         }
-      } else {
-        desiredC = A.clone().add(srcAC.multiplyScalar(chain.reachScale));
       }
 
       let AC = desiredC.clone().sub(A);
@@ -2532,7 +2485,9 @@ export async function bakeRetarget(options){
       ctrlHipsFree:c.helperRig.ctrlHipsFree,
       ctrlFootIK:c.helperRig.ctrlFootIK,
       ctrlPole:c.helperRig.ctrlPole,
-      footTarget:c.helperRig.footTarget
+      footTarget:c.helperRig.footTarget,
+      contactFrames:c.contactFrames || 0,
+      totalFrames:frameCount
     }) : null).filter(Boolean),
     footCorrectionMode:(useMixamoHelperRig && targetRig.cloudRigProfile)
       ? "mixamo-helper-pose-space"
