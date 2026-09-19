@@ -123,39 +123,52 @@ function findRigBone(rig,...names){
   return rig.bones.find(b => wanted.has(compactBoneName(b.name))) || null;
 }
 
+// Viewport-only CloudRig skeleton.
+// IMPORTANT: do not draw "virtual anatomical bridges" between DEF branches
+// that are disconnected in the exported FBX (Chest->Shoulder, Hips->Thigh,
+// Chest->Neck, Neck->Head). Those links are created by Blender constraints in
+// the original rig, but the constraints are absent in FBX. Drawing a straight
+// line between those unrelated branch roots creates the giant cyan/green
+// spikes seen in the viewport even when the mesh retarget itself is correct.
+//
+// Only draw edges that are genuine parent-chain segments in the exported DEF
+// skeleton. This changes visualization only; it does NOT alter retargeting.
 const CLOUDRIG_DISPLAY_EDGES = [
   ["DEF-Hips","DEF-Spine"],
   ["DEF-Spine","DEF-Chest"],
-  ["DEF-Chest","DEF-Neck"],
-  ["DEF-Neck","DEF-Head"],
 
-  ["DEF-Chest","DEF-ShoulderL"],
   ["DEF-ShoulderL","DEF-UpperArm_1L"],
   ["DEF-UpperArm_1L","DEF-UpperArm_2L"],
   ["DEF-UpperArm_2L","DEF-Forearm_1L"],
   ["DEF-Forearm_1L","DEF-Forearm_2L"],
   ["DEF-Forearm_2L","DEF-HandL"],
 
-  ["DEF-Chest","DEF-ShoulderR"],
   ["DEF-ShoulderR","DEF-UpperArm_1R"],
   ["DEF-UpperArm_1R","DEF-UpperArm_2R"],
   ["DEF-UpperArm_2R","DEF-Forearm_1R"],
   ["DEF-Forearm_1R","DEF-Forearm_2R"],
   ["DEF-Forearm_2R","DEF-HandR"],
 
-  ["DEF-Hips","DEF-Thigh_1L"],
   ["DEF-Thigh_1L","DEF-Thigh_2L"],
   ["DEF-Thigh_2L","DEF-Knee_1L"],
   ["DEF-Knee_1L","DEF-Knee_2L"],
   ["DEF-Knee_2L","DEF-FootL"],
   ["DEF-FootL","DEF-ToesL"],
 
-  ["DEF-Hips","DEF-Thigh_1R"],
   ["DEF-Thigh_1R","DEF-Thigh_2R"],
   ["DEF-Thigh_2R","DEF-Knee_1R"],
   ["DEF-Knee_1R","DEF-Knee_2R"],
   ["DEF-Knee_2R","DEF-FootR"],
   ["DEF-FootR","DEF-ToesR"]
+];
+
+const CLOUDRIG_DISPLAY_POINTS = [
+  "DEF-Hips","DEF-Spine","DEF-Chest","DEF-Neck","DEF-Head",
+  "DEF-ShoulderL","DEF-ShoulderR",
+  "DEF-UpperArm_1L","DEF-UpperArm_2L","DEF-Forearm_1L","DEF-Forearm_2L","DEF-HandL",
+  "DEF-UpperArm_1R","DEF-UpperArm_2R","DEF-Forearm_1R","DEF-Forearm_2R","DEF-HandR",
+  "DEF-Thigh_1L","DEF-Thigh_2L","DEF-Knee_1L","DEF-Knee_2L","DEF-FootL","DEF-ToesL",
+  "DEF-Thigh_1R","DEF-Thigh_2R","DEF-Knee_1R","DEF-Knee_2R","DEF-FootR","DEF-ToesR"
 ];
 
 function createCloudRigDeformHelper(rig){
@@ -192,12 +205,53 @@ function createCloudRigDeformHelper(rig){
     attr.needsUpdate = true;
     geometry.computeBoundingSphere();
   };
-  lines.userData.updateFromRig();
-  return lines;
+  const pointBones = CLOUDRIG_DISPLAY_POINTS
+    .map(name => findRigBone(rig,name))
+    .filter(Boolean);
+  const pointGeometry = new THREE.BufferGeometry();
+  const pointPositions = new Float32Array(pointBones.length * 3);
+  pointGeometry.setAttribute("position",new THREE.BufferAttribute(pointPositions,3));
+  const pointMaterial = new THREE.PointsMaterial({
+    color:0x39d7ff,
+    size:4,
+    sizeAttenuation:false,
+    transparent:true,
+    opacity:.95,
+    depthTest:false
+  });
+  const points = new THREE.Points(pointGeometry,pointMaterial);
+  points.frustumCulled = false;
+
+  const group = new THREE.Group();
+  group.add(lines);
+  group.add(points);
+  group.userData.updateFromRig = () => {
+    rig.root.updateMatrixWorld(true);
+
+    // Native DEF chain segments.
+    lines.userData.updateFromRig();
+
+    // Root joints of disconnected branches are shown as points rather than
+    // fake long links across the viewport.
+    const attr = pointGeometry.getAttribute("position");
+    const p = new THREE.Vector3();
+    pointBones.forEach((bone,index) => {
+      p.setFromMatrixPosition(bone.matrixWorld);
+      attr.setXYZ(index,p.x,p.y,p.z);
+    });
+    attr.needsUpdate = true;
+    pointGeometry.computeBoundingSphere();
+  };
+
+  group.userData.updateFromRig();
+  return group;
 }
 
 function cloudRigDisplayBones(rig){
-  const names = new Set(CLOUDRIG_DISPLAY_EDGES.flat().map(compactBoneName));
+  const names = new Set([
+    ...CLOUDRIG_DISPLAY_EDGES.flat(),
+    ...CLOUDRIG_DISPLAY_POINTS
+  ].map(compactBoneName));
   return rig.bones.filter(b => names.has(compactBoneName(b.name)));
 }
 
