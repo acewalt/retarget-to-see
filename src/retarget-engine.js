@@ -1534,6 +1534,17 @@ export async function bakeRetarget(options){
   const virtualParentByTarget = new Map();
   const virtualRestOffsetByTarget = new Map();
   const virtualSourceDepthByTarget = new Map();
+  const naturallyConnectedVirtualTargets = [];
+
+  function isActualBoneAncestor(ancestorName,childName){
+    const child = targetRig.boneMap.get(childName);
+    let p = child?.parent;
+    while (p?.isBone){
+      if (p.name === ancestorName) return true;
+      p = p.parent;
+    }
+    return false;
+  }
 
   for (const r of sourceRecordByName.values()){
     const childTarget = r.targetBone.name;
@@ -1553,6 +1564,17 @@ export async function bakeRetarget(options){
     const childRest = targetRig.rest.get(childTarget);
     const parentRest = targetRig.rest.get(parentTarget);
     if (!childRest || !parentRest) continue;
+
+    // If the mapped anatomical parent is already an actual ancestor in the
+    // exported FBX (possibly through twist segments such as
+    // DEF-UpperArm_1 -> DEF-UpperArm_2 -> DEF-Forearm_1), natural parenting
+    // already keeps the chain connected. Adding position tracks here bends
+    // or stretches the deform chain twice. Only synthesize a positional link
+    // when the FBX hierarchy is genuinely disconnected.
+    if (isActualBoneAncestor(parentTarget,childTarget)){
+      naturallyConnectedVirtualTargets.push(childTarget);
+      continue;
+    }
 
     virtualParentByTarget.set(childTarget,parentTarget);
     virtualRestOffsetByTarget.set(
@@ -1616,10 +1638,6 @@ export async function bakeRetarget(options){
         targetUpperLen,targetForeLen,
         reachScale:targetReach/sourceReach
       });
-
-      // The correction writes explicit elbow/wrist positions.
-      locationTargets.add(tMidName);
-      locationTargets.add(tEndName);
     }
   }
 
@@ -2040,16 +2058,11 @@ export async function bakeRetarget(options){
         rebuildWorldOut();
       }
 
-      // Explicitly place the elbow at the solved point.
-      const midBone = targetRig.boneMap.get(chain.tMidName);
-      const midRest = targetRig.rest.get(chain.tMidName);
-      const midState = localState.get(chain.tMidName);
-      if (!midBone || !midRest || !midState) continue;
-      let midParentWorld = parentWorldForBone(midBone,worldOut,midRest);
-      midState.position.copy(vectorToLocal(midParentWorld,desiredB));
-      rebuildWorldOut();
-
-      // Swing forearm so the wrist lands on desiredC.
+      // Do NOT translate DEF-Forearm / DEF-Hand. In CloudRig the deform
+      // chain contains intermediate twist bones (_1/_2). Their bind-space
+      // translations define the real limb lengths. Moving mapped DEF joints
+      // directly bends/stretches that chain twice. Let hierarchy propagation
+      // move the elbow naturally after the upper-arm swing.
       const foreWorldQ = worldQuaternionOf(chain.tMidName);
       const midPos = worldPositionOf(chain.tMidName);
       const endPosBefore = worldPositionOf(chain.tEndName);
@@ -2069,15 +2082,13 @@ export async function bakeRetarget(options){
         }
       }
 
-      // Lock the wrist position but preserve the hand orientation already
-      // produced by the FK retarget.
+      // Preserve the hand's FK world orientation after the parent rotations.
+      // Position is inherited naturally through DEF-Forearm_2 -> DEF-Hand.
       const endBone = targetRig.boneMap.get(chain.tEndName);
       const endRest = targetRig.rest.get(chain.tEndName);
       const endState = localState.get(chain.tEndName);
       if (!endBone || !endRest || !endState) continue;
       const endParentWorld = parentWorldForBone(endBone,worldOut,endRest);
-      endState.position.copy(vectorToLocal(endParentWorld,desiredC));
-
       const endParentQ = new THREE.Quaternion();
       endParentWorld.decompose(
         new THREE.Vector3(),
@@ -2204,6 +2215,8 @@ export async function bakeRetarget(options){
     ),
     virtualChainStabilizedTargets:virtualTargets,
     virtualChainStabilizedCount:virtualTargets.length,
+    naturalHierarchyTargets:naturallyConnectedVirtualTargets,
+    naturalHierarchyTargetCount:naturallyConnectedVirtualTargets.length,
     handEndEffectorCorrection:Boolean(correctHands),
     handEndEffectorChains:armCorrectionChains.map(c => ({
       side:c.side,
