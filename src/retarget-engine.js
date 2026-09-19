@@ -1542,6 +1542,39 @@ function pushVec(values,v){
   values.push(v.x,v.y,v.z);
 }
 
+function buildStaticBodyFrame(leftPos,rightPos,hipsPos,chestPos){
+  if (!leftPos || !rightPos || !hipsPos || !chestPos) return null;
+
+  const lateral = rightPos.clone().sub(leftPos);
+  const up = chestPos.clone().sub(hipsPos);
+  if (lateral.lengthSq() < EPS || up.lengthSq() < EPS) return null;
+
+  lateral.normalize();
+  up.addScaledVector(lateral,-up.dot(lateral));
+  if (up.lengthSq() < EPS) return null;
+  up.normalize();
+
+  const forward = lateral.clone().cross(up);
+  if (forward.lengthSq() < EPS) return null;
+  forward.normalize();
+
+  // Re-orthogonalize so both rigs use an equivalent right-handed frame.
+  up.copy(forward.clone().cross(lateral)).normalize();
+  return {lateral,up,forward};
+}
+
+function mapVectorBetweenBodyFrames(v,sourceFrame,targetFrame){
+  if (!sourceFrame || !targetFrame) return v.clone();
+
+  const x = v.dot(sourceFrame.lateral);
+  const y = v.dot(sourceFrame.up);
+  const z = v.dot(sourceFrame.forward);
+
+  return targetFrame.lateral.clone().multiplyScalar(x)
+    .add(targetFrame.up.clone().multiplyScalar(y))
+    .add(targetFrame.forward.clone().multiplyScalar(z));
+}
+
 export async function bakeRetarget(options){
   const {
     sourceRig,targetRig,sourceClip,pairs=[],
