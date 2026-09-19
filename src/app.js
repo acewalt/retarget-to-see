@@ -20,8 +20,8 @@ import {
   captureRestPosePreset,
   captureCurrentRigReference,
   serializeMap
-} from "./retarget-engine.js?v=20260919-integrity1";
-import { injectAnimationIntoOriginalFbx } from "./fbx-animation-injector.js?v=20260919-integrity1";
+} from "./retarget-engine.js?v=20260919-deform-controls1";
+import { injectAnimationIntoOriginalFbx } from "./fbx-animation-injector.js?v=20260919-deform-controls1";
 
 const $ = id => document.getElementById(id);
 
@@ -3119,6 +3119,73 @@ function prepareExactOriginalNameExport(rig,clip){
   };
 }
 
+function mergeExactTargetClips(previewClip,controlClip){
+  if (!previewClip) throw new Error("No existe el clip deformado del viewport.");
+
+  // The imported FBX has no Blender CloudRig constraints. Therefore an
+  // action that animates only FK controls leaves the weighted DEF bones in
+  // rest pose and the mesh does not move. The exact FBX must carry BOTH:
+  //   1) the already verified viewport/deform result (drives the skin), and
+  //   2) the FK/control bake (keeps the visible control layer coherent).
+  // The deform clip wins only if an identical track name exists.
+  const byName = new Map();
+
+  for (const track of previewClip.tracks || []){
+    byName.set(track.name,track.clone());
+  }
+  for (const track of controlClip?.tracks || []){
+    if (!byName.has(track.name)){
+      byName.set(track.name,track.clone());
+    }
+  }
+
+  const duration = Math.max(
+    Number(previewClip.duration) || 0,
+    Number(controlClip?.duration) || 0
+  );
+
+  return new THREE.AnimationClip(
+    "Retargeted_EXACT_TARGET_Baked",
+    duration,
+    [...byName.values()]
+  );
+}
+
+function clipTargetNodeNames(clip){
+  const out = new Set();
+  for (const track of clip?.tracks || []){
+    try{
+      const parsed = THREE.PropertyBinding.parseTrackName(track.name);
+      if (parsed?.nodeName) out.add(parsed.nodeName);
+    }catch{}
+  }
+  return out;
+}
+
+function assertExactClipDrivesWeightedBones(rig,clip){
+  const weighted = rig?.weightedBoneNames || new Set();
+  if (!weighted.size) return {animatedWeighted:[],totalWeighted:0};
+
+  const targets = clipTargetNodeNames(clip);
+  const animatedWeighted = [...weighted].filter(name => targets.has(name));
+
+  // This is intentionally a hard gate for CloudRig. The broken export the
+  // user reported animated 23 FK/control bones and ZERO weighted DEF bones,
+  // which produces a motionless mesh plus a split-looking armature.
+  if (rig.cloudRigProfile && animatedWeighted.length === 0){
+    throw new Error(
+      "La Action exacta no contiene ningún DEF con pesos. "
+      + "Se bloqueó la descarga para evitar otro FBX con controles animados "
+      + "pero malla inmóvil."
+    );
+  }
+
+  return {
+    animatedWeighted:animatedWeighted.sort(),
+    totalWeighted:weighted.size
+  };
+}
+
 function createOriginalRigCarrier(rig){
   // glTF only treats nodes as bones when they are joints of a skin. The
   // original CloudRig has many FK/control bones that have no vertex weights,
@@ -3247,18 +3314,29 @@ async function exportOriginalTargetRigFbx(){
   els.playBtn.textContent = "▶";
   setBusy(true);
   hideProgress();
-  setStatus("Inyectando la Action dentro del FBX Target ORIGINAL…");
+  setStatus("Preparando FBX exacto: DEF + controles sobre el Target original…");
 
   try{
     validateOriginalCloudRigControls(rig);
+
+    // Bake the original FK/control layer, but DO NOT use it alone. An FBX does
+    // not carry Blender's CloudRig constraints, so FK-only animation cannot
+    // drive the weighted DEF skeleton after re-import.
     const direct = await bakeOriginalRigControlClip();
+
+    // The viewport clip is already the evaluated deformation result that the
+    // user sees on the Target mesh. Merge it with the control bake so the same
+    // FBX contains animated DEF bones AND the corresponding FK controls.
+    const exactClip = mergeExactTargetClips(previewClip,direct.clip);
+    const coverage = assertExactClipDrivesWeightedBones(rig,exactClip);
 
     resetRigToRest(rig);
     rig.root.updateMatrixWorld(true);
 
-    // Generate only an animation DONOR. Its skeleton is never downloaded.
-    // We use it solely to let the FBX animation writer encode the curves.
-    exactNames = prepareExactOriginalNameExport(rig,direct.clip);
+    // Generate an animation donor only. The donor skeleton is discarded.
+    // prepareExactOriginalNameExport binds every track by UUID before restoring
+    // the original FBX names (.L/.R included).
+    exactNames = prepareExactOriginalNameExport(rig,exactClip);
 
     const FBXExporter = await loadOriginalRigFbxExporter();
     const donorExporter = new FBXExporter();
@@ -3276,21 +3354,18 @@ async function exportOriginalTargetRigFbx(){
       onlyVisible:false,
       objectFilter:(obj) => !obj.isMesh && !obj.isLight && !obj.isCamera,
       customProperties:false,
-      creator:"Retarget to See animation donor only"
+      creator:"Retarget to See exact Target animation donor"
     });
 
     if (!(donorBytes instanceof Uint8Array) || donorBytes.byteLength < 1024){
       throw new Error("No pude construir el FBX donante de animación.");
     }
 
-    // Critical path: keep the user's Target FBX itself. We parse the original
-    // uploaded bytes and append only AnimationStack/Layer/CurveNode/Curve
-    // records. Models, bones, hierarchy, rest transforms, skin, mesh, unit
-    // settings and Blender-exported FBX metadata come from the original file.
+    // Keep the uploaded Target FBX itself. Only animation records are appended.
     const injected = injectAnimationIntoOriginalFbx(
       state.targetOriginalFbxBytes,
       donorBytes,
-      {actionName:direct.clip.name}
+      {actionName:exactClip.name}
     );
 
     const name = safeBaseName(rig.fileName || "target")
@@ -3303,21 +3378,23 @@ async function exportOriginalTargetRigFbx(){
 
     const d = injected.diagnostics;
     const i = d.integrity || {};
+    const controlTargets = d.mappedTargets.filter(n =>
+      /^(FK-|HIP-Spine$|TORSO-Spine$|root$)/.test(n)
+    );
+    const deformTargets = d.mappedTargets.filter(n => /^DEF-/.test(n));
+
     setStatus(
       "FBX exacto exportado y verificado: " + name
-      + ". Payload original intacto: "
-      + (i.limbNodes ?? "?") + " huesos LimbNode, "
-      + (i.meshes ?? "?") + " Model Mesh, "
-      + (i.geometries ?? "?") + " Geometry, "
+      + ". El Target original quedó intacto: "
+      + (i.limbNodes ?? "?") + " LimbNode, "
+      + (i.meshes ?? "?") + " Mesh, "
       + (i.skins ?? "?") + " Skin, "
-      + (i.clusters ?? "?") + " Clusters, "
-      + (i.weightedClusters ?? "?") + " grupos con pesos reales. "
-      + "No se reconstruyó armature/mesh/weights; sólo se añadieron "
-      + d.donorAnimationObjects + " objetos de animación y "
-      + d.donorConnections + " conexiones. Controles animados: "
-      + d.mappedTargets.slice(0,24).join(", ")
-      + (d.mappedTargets.length > 24 ? "…" : "")
-      + ".",
+      + (i.clusters ?? "?") + " Clusters. "
+      + "La Action ahora anima " + deformTargets.length
+      + " DEF del archivo (" + coverage.animatedWeighted.length
+      + "/" + coverage.totalWeighted + " grupos con peso detectados) y "
+      + controlTargets.length + " controles FK/root. "
+      + "Esto corrige el fallo anterior donde sólo se animaban FK y la malla quedaba quieta.",
       "success"
     );
   }catch(err){
