@@ -20,7 +20,7 @@ import {
   captureRestPosePreset,
   captureCurrentRigReference,
   serializeMap
-} from "./retarget-engine.js?v=20260919-cloudrig-original-controls1";
+} from "./retarget-engine.js?v=20260919-cloudrig-original-controls2";
 
 const $ = id => document.getElementById(id);
 
