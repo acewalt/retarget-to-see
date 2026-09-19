@@ -19,7 +19,7 @@ import {
   previewRestPosePreset,
   captureRestPosePreset,
   serializeMap
-} from "./retarget-engine.js?v=20260919-mixamo-helper-matrix1";
+} from "./retarget-engine.js?v=20260919-mixamo-helper-posespace1";
 
 const $ = id => document.getElementById(id);
 
@@ -1896,8 +1896,8 @@ async function applyRetarget(){
     const footCorrectionText = result.footEndEffectorCorrection
       ? ` Corrección de pies activa: ${result.footEndEffectorChains.length} piernas, solo rotación 2-bone.`
       : "";
-    const mixamoHelperText = result.footCorrectionMode === "mixamo-helper-pose-matrix"
-      ? " Rig intermedio Mixamo activo: helper Foot IK por delta de matriz completo."
+    const mixamoHelperText = result.footCorrectionMode === "mixamo-helper-pose-space"
+      ? " Rig intermedio Mixamo activo: Foot IK en POSE space del armature."
       : "";
     const bendPlaneText = result.limbBendPlaneMode === "source-plane"
       ? " Bend plane piernas: Source."
