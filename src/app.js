@@ -20,7 +20,7 @@ import {
   captureRestPosePreset,
   captureCurrentRigReference,
   serializeMap
-} from "./retarget-engine.js?v=20260919-glb-skeleton-normalize1";
+} from "./retarget-engine.js?v=20260919-fbx-meters1";
 
 const $ = id => document.getElementById(id);
 
@@ -443,7 +443,7 @@ class RigViewport{
 
     // Give the model deliberate breathing room. 1.25 was too tight,
     // especially with the linked cameras and crouched/sitting poses.
-    const framePadding = 2.65;
+    const framePadding = 3.60;
     const distance = radius
       / Math.tan(THREE.MathUtils.degToRad(this.camera.fov*.5))
       * framePadding;
@@ -1038,6 +1038,46 @@ function forceTargetBindPose(root){
   };
 }
 
+function normalizeFbxUnitsToMeters(root){
+  if (!root) return {
+    applied:false,
+    unitScaleFactor:null,
+    metersPerUnit:1
+  };
+
+  root.userData ||= {};
+
+  if (root.userData._retargetUnitsNormalized){
+    return root.userData._retargetUnitsNormalized;
+  }
+
+  // FBX GlobalSettings.UnitScaleFactor is expressed in centimeters per
+  // scene unit. FBXLoader exposes it in root.userData.unitScaleFactor but
+  // intentionally leaves vertex/bone numbers untouched. glTF, however,
+  // requires linear distances to be meters.
+  //
+  // meters per FBX unit = centimeters per unit / 100
+  const unitScaleFactor = Number(root.userData.unitScaleFactor);
+  const validUnit = Number.isFinite(unitScaleFactor) && unitScaleFactor > 0;
+  const metersPerUnit = validUnit ? unitScaleFactor * 0.01 : 1;
+
+  // Avoid applying an almost-identity conversion and never normalize twice.
+  const applied = Math.abs(metersPerUnit - 1) > 1e-8;
+  if (applied){
+    root.scale.multiplyScalar(metersPerUnit);
+    root.updateMatrix();
+    root.updateMatrixWorld(true);
+  }
+
+  const info = {
+    applied,
+    unitScaleFactor:validUnit ? unitScaleFactor : null,
+    metersPerUnit
+  };
+  root.userData._retargetUnitsNormalized = info;
+  return info;
+}
+
 async function loadFbx(file,kind){
   if (!file) return;
   setStatus(`Cargando ${kind}: ${file.name}…`);
@@ -1051,6 +1091,10 @@ async function loadFbx(file,kind){
     throw new Error(`No pude leer ${file.name} como FBX: ${err.message || err}`);
   }
   root.name ||= safeBaseName(file.name);
+
+  // Normalize FBX centimeters/declared units to Three/glTF meters BEFORE
+  // rest capture, bounds, animation sampling or retarget math.
+  const unitInfo = normalizeFbxUnitsToMeters(root);
 
   // Source keeps its embedded clips because those are the motion to read.
   // Target clips are deliberately ignored: Target must enter the pipeline
@@ -1109,7 +1153,7 @@ async function loadFbx(file,kind){
       const poseBox = sourceView.currentRenderedBox();
       const poseSize = poseBox?.getSize(new THREE.Vector3());
       const restH = Number(rig.visualRest?.height || 0);
-      els.sourceMeta.textContent = `${file.name} · ${rig.bones.length} huesos · ${rig.animations.length} clips${rig.visualRest?.valid ? ` · bounds ${rig.visualRest.skinnedMeshCount || 0} skinned` : ""}${restH ? ` · rest H ${restH.toFixed(3)}` : ""}${poseSize ? ` · pose H ${poseSize.y.toFixed(3)}` : ""}`;
+      els.sourceMeta.textContent = `${file.name} · ${rig.bones.length} huesos · ${rig.animations.length} clips${rig.visualRest?.valid ? ` · bounds ${rig.visualRest.skinnedMeshCount || 0} skinned` : ""}${restH ? ` · rest H ${restH.toFixed(3)}m` : ""}${poseSize ? ` · pose H ${poseSize.y.toFixed(3)}m` : ""}${unitInfo.unitScaleFactor != null ? ` · FBX unit ${unitInfo.unitScaleFactor}cm → ×${unitInfo.metersPerUnit.toFixed(4)}m` : ""}`;
     }
   } else {
     state.targetRig = rig;
@@ -1138,7 +1182,7 @@ async function loadFbx(file,kind){
       const poseBox = targetView.currentRenderedBox();
       const poseSize = poseBox?.getSize(new THREE.Vector3());
       const restH = Number(rig.visualRest?.height || 0);
-      els.targetMeta.textContent = `${file.name} · ${rig.bones.length} huesos${weightedInfo}${profileInfo}${ignored}${rig.visualRest?.valid ? ` · bounds ${rig.visualRest.skinnedMeshCount || 0} skinned` : ""}${restH ? ` · rest H ${restH.toFixed(3)}` : ""}${poseSize ? ` · pose H ${poseSize.y.toFixed(3)}` : ""}`;
+      els.targetMeta.textContent = `${file.name} · ${rig.bones.length} huesos${weightedInfo}${profileInfo}${ignored}${rig.visualRest?.valid ? ` · bounds ${rig.visualRest.skinnedMeshCount || 0} skinned` : ""}${restH ? ` · rest H ${restH.toFixed(3)}m` : ""}${poseSize ? ` · pose H ${poseSize.y.toFixed(3)}m` : ""}${unitInfo.unitScaleFactor != null ? ` · FBX unit ${unitInfo.unitScaleFactor}cm → ×${unitInfo.metersPerUnit.toFixed(4)}m` : ""}`;
     }
     els.exportGlbBtn.disabled = true;
     els.exportClipBtn.disabled = true;
@@ -2619,7 +2663,7 @@ async function exportGlb(){
       : "";
 
     setStatus(
-      `GLB exportado: ${name}. Root scale=[${rs.x.toFixed(4)}, ${rs.y.toFixed(4)}, ${rs.z.toFixed(4)}]. Bounds world original=[${ws.x.toFixed(4)}, ${ws.y.toFixed(4)}, ${ws.z.toFixed(4)}], normalizado=[${nws.x.toFixed(4)}, ${nws.y.toFixed(4)}, ${nws.z.toFixed(4)}].${normalizedNodes}${nodeScaleNote}${materialNote}`,
+      `GLB exportado: ${name}. Root scale=[${rs.x.toFixed(4)}, ${rs.y.toFixed(4)}, ${rs.z.toFixed(4)}]. Bounds world original=[${ws.x.toFixed(4)}, ${ws.y.toFixed(4)}, ${ws.z.toFixed(4)}] m, normalizado=[${nws.x.toFixed(4)}, ${nws.y.toFixed(4)}, ${nws.z.toFixed(4)}] m. FBX→glTF units ya normalizadas a metros.${normalizedNodes}${nodeScaleNote}${materialNote}`,
       "success"
     );
   }catch(err){
