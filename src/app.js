@@ -18,8 +18,9 @@ import {
   bakeIkIntoClip,
   previewRestPosePreset,
   captureRestPosePreset,
+  captureCurrentRigReference,
   serializeMap
-} from "./retarget-engine.js?v=20260919-skinned-bounds1";
+} from "./retarget-engine.js?v=20260919-target-reference1";
 
 const $ = id => document.getElementById(id);
 
@@ -58,6 +59,16 @@ const els = {
   previewRestBtn:$("previewRestBtn"),
   saveRestBtn:$("saveRestBtn"),
   includeRestLocScale:$("includeRestLocScale"),
+  useTargetReference:$("useTargetReference"),
+  targetRestBone:$("targetRestBone"),
+  targetRestRotX:$("targetRestRotX"),
+  targetRestRotY:$("targetRestRotY"),
+  targetRestRotZ:$("targetRestRotZ"),
+  applyTargetRestBoneBtn:$("applyTargetRestBoneBtn"),
+  resetTargetRestBoneBtn:$("resetTargetRestBoneBtn"),
+  captureCommonReferenceBtn:$("captureCommonReferenceBtn"),
+  resetTargetReferenceBtn:$("resetTargetReferenceBtn"),
+  targetReferenceInfo:$("targetReferenceInfo"),
   autoBakeIk:$("autoBakeIk"),
   useWorldLocation:$("useWorldLocation"),
   correctHands:$("correctHands"),
@@ -101,12 +112,187 @@ const state = {
   customRestPoses:[],
   restPosePreset:null,
   restPoseBuiltin:false,
+  targetRestOverride:null,
+  targetReferenceSourceTime:null,
   currentTime:0,
   playing:false,
   lastTick:performance.now(),
   busy:false,
   faceRegions:Object.fromEntries(FACE_REGIONS.map(r => [r,1]))
 };
+
+function clearTargetReferenceState({restoreTarget=false}={}){
+  state.targetRestOverride = null;
+  state.targetReferenceSourceTime = null;
+  if (els.useTargetReference) els.useTargetReference.checked = false;
+
+  if (restoreTarget && state.targetRig){
+    state.retargetClip = null;
+    resetRigToRest(state.targetRig);
+  }
+
+  if (els.targetReferenceInfo){
+    els.targetReferenceInfo.textContent =
+      "Ajusta el Target para que coincida con la pose actual del Source y captura ambos como referencia de retarget.";
+  }
+}
+
+function targetReferenceBone(){
+  if (!state.targetRig) return null;
+  const raw = String(els.targetRestBone?.value || "").trim();
+  if (!raw) return null;
+  const {targetPrefix} = currentPrefixes();
+  return resolveRetargetTargetBone(state.targetRig,raw,targetPrefix)
+    || resolveBone(state.targetRig,raw,targetPrefix);
+}
+
+function refreshTargetRestBoneFields(){
+  const bone = targetReferenceBone();
+  const disabled = !bone || state.busy;
+
+  els.applyTargetRestBoneBtn.disabled = disabled;
+  els.resetTargetRestBoneBtn.disabled = disabled;
+
+  if (!bone) return;
+
+  const base = state.targetRig.rest.get(bone.name);
+  if (!base) return;
+
+  const delta = base.quaternion.clone().invert()
+    .multiply(bone.quaternion)
+    .normalize();
+  const e = new THREE.Euler().setFromQuaternion(delta,"XYZ");
+
+  els.targetRestRotX.value = THREE.MathUtils.radToDeg(e.x).toFixed(2);
+  els.targetRestRotY.value = THREE.MathUtils.radToDeg(e.y).toFixed(2);
+  els.targetRestRotZ.value = THREE.MathUtils.radToDeg(e.z).toFixed(2);
+
+  els.targetReferenceInfo.textContent =
+    `Editando ${els.targetRestBone.value} → ${bone.name}. Offset local respecto al bind/rest original.`;
+}
+
+function applyTargetRestBoneOffset(){
+  if (!state.targetRig || state.busy) return;
+
+  // Editing a reference pose and previewing a baked retarget are mutually
+  // exclusive. Clear the baked output first so the user's edit is visible
+  // and cannot accidentally be captured from an animation frame.
+  if (state.retargetClip){
+    state.retargetClip = null;
+    resetRigToRest(state.targetRig);
+  }
+
+  const bone = targetReferenceBone();
+  if (!bone){
+    setStatus("Selecciona un hueso Target válido para editar la referencia.","error");
+    return;
+  }
+
+  const base = state.targetRig.rest.get(bone.name);
+  if (!base) return;
+
+  const degX = Number(els.targetRestRotX.value) || 0;
+  const degY = Number(els.targetRestRotY.value) || 0;
+  const degZ = Number(els.targetRestRotZ.value) || 0;
+  const offset = new THREE.Quaternion().setFromEuler(
+    new THREE.Euler(
+      THREE.MathUtils.degToRad(degX),
+      THREE.MathUtils.degToRad(degY),
+      THREE.MathUtils.degToRad(degZ),
+      "XYZ"
+    )
+  );
+
+  bone.position.copy(base.position);
+  bone.scale.copy(base.scale);
+  bone.quaternion.copy(base.quaternion).multiply(offset).normalize();
+  bone.updateMatrix();
+  state.targetRig.root.updateMatrixWorld(true);
+
+  // Any previous captured reference is now stale.
+  state.targetRestOverride = null;
+  state.targetReferenceSourceTime = null;
+  els.useTargetReference.checked = false;
+
+  setStatus(
+    `Offset de referencia aplicado a ${bone.name}: X ${degX.toFixed(1)}°, Y ${degY.toFixed(1)}°, Z ${degZ.toFixed(1)}°. Captura la referencia común cuando Source y Target coincidan.`,
+    "success"
+  );
+  updateButtons();
+}
+
+function resetTargetRestBone(){
+  if (!state.targetRig || state.busy) return;
+  if (state.retargetClip){
+    state.retargetClip = null;
+    resetRigToRest(state.targetRig);
+  }
+
+  const bone = targetReferenceBone();
+  if (!bone) return;
+  const base = state.targetRig.rest.get(bone.name);
+  if (!base) return;
+
+  bone.position.copy(base.position);
+  bone.quaternion.copy(base.quaternion);
+  bone.scale.copy(base.scale);
+  bone.updateMatrix();
+  state.targetRig.root.updateMatrixWorld(true);
+
+  state.targetRestOverride = null;
+  state.targetReferenceSourceTime = null;
+  els.useTargetReference.checked = false;
+  refreshTargetRestBoneFields();
+  setStatus(`Hueso ${bone.name} restaurado al rest original.`,"success");
+  updateButtons();
+}
+
+function captureCommonReference(){
+  if (!state.sourceRig || !state.targetRig || !state.sourceClip || state.busy){
+    setStatus("Carga Source y Target antes de capturar una referencia común.","error");
+    return;
+  }
+
+  if (state.retargetClip){
+    setStatus(
+      "El Target está mostrando un retarget horneado. Restaura el Target antes de capturar una nueva referencia.",
+      "error"
+    );
+    return;
+  }
+
+  // Target pose is captured exactly as it is currently displayed. Source uses
+  // the current timeline time through the existing Use Current Source Pose as
+  // Rest path, so both rigs share one semantic zero-pose.
+  state.targetRestOverride = captureCurrentRigReference(state.targetRig,false);
+  state.targetReferenceSourceTime = state.currentTime;
+
+  els.useTargetReference.checked = true;
+  els.useCurrentRest.checked = true;
+  els.useCustomRest.checked = false;
+
+  els.targetReferenceInfo.textContent =
+    `Referencia común capturada: Source t=${state.currentTime.toFixed(3)} s + Target pose actual. Sólo rotación; posiciones/longitudes del Target se conservan.`;
+
+  updateRestPoseControls();
+  updateButtons();
+  setStatus(
+    `Referencia común capturada en Source t=${state.currentTime.toFixed(3)} s. El siguiente retarget usará esta pose como cero para ambos rigs.`,
+    "success"
+  );
+}
+
+function resetTargetReference(){
+  if (!state.targetRig || state.busy) return;
+  state.retargetClip = null;
+  clearTargetReferenceState({restoreTarget:true});
+  els.targetRestBone.value = "";
+  els.targetRestRotX.value = "0";
+  els.targetRestRotY.value = "0";
+  els.targetRestRotZ.value = "0";
+  updateButtons();
+  setStatus("Target restaurado a su bind/rest original y referencia Target desactivada.","success");
+}
 
 class RigViewport{
   constructor(container){
@@ -561,6 +747,9 @@ async function loadFbx(file,kind){
   if (kind === "Source"){
     state.sourceRig = rig;
     state.sourceClip = rig.animations[0] || null;
+    state.targetReferenceSourceTime = null;
+    if (els.useTargetReference) els.useTargetReference.checked = false;
+    state.targetRestOverride = null;
     sourceView.setRig(rig);
     els.sourceDropHint.hidden = true;
     populateSourceClips();
@@ -569,6 +758,11 @@ async function loadFbx(file,kind){
   } else {
     state.targetRig = rig;
     state.retargetClip = null;
+    clearTargetReferenceState();
+    if (els.targetRestBone) els.targetRestBone.value = "";
+    if (els.targetRestRotX) els.targetRestRotX.value = "0";
+    if (els.targetRestRotY) els.targetRestRotY.value = "0";
+    if (els.targetRestRotZ) els.targetRestRotZ.value = "0";
 
     // Explicitly stop/clear any mixer state and keep Target at the rest pose
     // captured *after* skeleton.pose(). No imported Target Action is allowed
@@ -1802,7 +1996,10 @@ function updateButtons(){
   const valid = countValidPairs(state.pairs,state.sourceRig,state.targetRig,sourcePrefix,targetPrefix).valid;
   const customRestReady = !els.useCustomRest.checked
     || Boolean(state.restPosePreset);
-  els.applyBtn.disabled = state.busy || !state.sourceRig || !state.targetRig || !state.sourceClip || valid === 0 || !customRestReady;
+  const targetReferenceReady = !els.useTargetReference.checked
+    || Boolean(state.targetRestOverride instanceof Map && state.targetRestOverride.size);
+
+  els.applyBtn.disabled = state.busy || !state.sourceRig || !state.targetRig || !state.sourceClip || valid === 0 || !customRestReady || !targetReferenceReady;
   els.applyBtn.title = valid === 0
     ? "No hay pares válidos para retargetear."
     : "Aplicar los pares válidos. Los dedos faltantes no bloquean el cuerpo.";
@@ -1813,6 +2010,14 @@ function updateButtons(){
     : "El Target FBX no contiene controles IK utilizables; el retarget FK/deform sigue funcionando.";
   els.exportGlbBtn.disabled = state.busy || !state.targetRig || !state.retargetClip;
   els.exportClipBtn.disabled = state.busy || !state.retargetClip;
+
+  if (els.captureCommonReferenceBtn){
+    els.captureCommonReferenceBtn.disabled = state.busy || !state.sourceRig || !state.targetRig || !state.sourceClip;
+  }
+  if (els.resetTargetReferenceBtn){
+    els.resetTargetReferenceBtn.disabled = state.busy || !state.targetRig;
+  }
+  refreshTargetRestBoneFields();
   updateRestPoseControls();
 }
 
@@ -1837,7 +2042,10 @@ async function applyRetarget(){
       );
     }
 
-    const restTime = state.currentTime;
+    const restTime = els.useTargetReference.checked
+      && Number.isFinite(state.targetReferenceSourceTime)
+      ? state.targetReferenceSourceTime
+      : state.currentTime;
     const useSavedRest = els.useCustomRest.checked
       && state.restPosePreset
       && builtInRestPoseCompatible();
@@ -1854,6 +2062,7 @@ async function applyRetarget(){
       restPosePreset:useSavedRest ? state.restPosePreset : null,
       includeRestLocationScale:els.includeRestLocScale.checked,
       sourceRestTime:restTime,
+      targetRestOverride:els.useTargetReference.checked ? state.targetRestOverride : null,
       useWorldLocation:els.useWorldLocation.checked,
       correctHands:els.correctHands.checked,
       correctFeet:els.correctFeet.checked,
@@ -1875,6 +2084,9 @@ async function applyRetarget(){
       : "";
     const meshScaleText = Number.isFinite(result.sourceMeshHeight) && Number.isFinite(result.targetMeshHeight)
       ? ` Mesh rest height Source=${result.sourceMeshHeight.toFixed(4)}, Target=${result.targetMeshHeight.toFixed(4)}${Number.isFinite(result.rawMeshScaleRatio) ? `, ratio=${result.rawMeshScaleRatio.toFixed(4)}` : ""}.`
+      : "";
+    const targetReferenceText = result.targetReferenceUsed
+      ? ` Referencia Target activa + Source rest en t=${restTime.toFixed(3)} s.`
       : "";
     const rootMotionText = result.rootMotionChannels
       ? ` Root motion LOC: ${result.rootMotionChannels} canal(es) sobre el objeto completo${result.rootMotionSources?.length ? ` desde ${result.rootMotionSources.join(", ")}` : ""}.`
@@ -1915,7 +2127,7 @@ async function applyRetarget(){
           .map(x => `${x.sources.join("+")}→${x.target}`)
           .join("; ")}.`
       : "";
-    let message = `Retarget FK terminado: ${result.validPairs}/${result.totalPairs} pares, cuerpo ${coverage.coreValid}/${coverage.coreTotal}, dedos ${coverage.fingerValid}/${coverage.fingerTotal}, ${result.frameCount} frames, scale ${result.locationScale.toFixed(4)}${scaleMethod}.${meshScaleText}${rootMotionText}${rootRotationText}${rootTranslationText}${pelvisSafetyText}${virtualChainText}${naturalHierarchyText}${handCorrectionText}${footCorrectionText}${bendPlaneText}${splitRootText}${collapsedText}${redirectedText}${unresolvedText}`;
+    let message = `Retarget FK terminado: ${result.validPairs}/${result.totalPairs} pares, cuerpo ${coverage.coreValid}/${coverage.coreTotal}, dedos ${coverage.fingerValid}/${coverage.fingerTotal}, ${result.frameCount} frames, scale ${result.locationScale.toFixed(4)}${scaleMethod}.${meshScaleText}${targetReferenceText}${rootMotionText}${rootRotationText}${rootTranslationText}${pelvisSafetyText}${virtualChainText}${naturalHierarchyText}${handCorrectionText}${footCorrectionText}${bendPlaneText}${splitRootText}${collapsedText}${redirectedText}${unresolvedText}`;
 
     if (els.autoBakeIk.checked && state.ikChains.length){
       try{
@@ -2170,6 +2382,20 @@ els.clearMapBtn.addEventListener("click",() => {
 });
 els.copyBoneMapBtn.addEventListener("click",copyBoneMapDiagnostic);
 els.copyFrameRotationsBtn.addEventListener("click",copyCurrentFrameRotations);
+
+els.useTargetReference.addEventListener("change",() => {
+  if (els.useTargetReference.checked && !(state.targetRestOverride instanceof Map && state.targetRestOverride.size)){
+    els.useTargetReference.checked = false;
+    setStatus("Primero captura una referencia común del Target.","error");
+  }
+  updateButtons();
+});
+els.targetRestBone.addEventListener("change",refreshTargetRestBoneFields);
+els.targetRestBone.addEventListener("input",refreshTargetRestBoneFields);
+els.applyTargetRestBoneBtn.addEventListener("click",applyTargetRestBoneOffset);
+els.resetTargetRestBoneBtn.addEventListener("click",resetTargetRestBone);
+els.captureCommonReferenceBtn.addEventListener("click",captureCommonReference);
+els.resetTargetReferenceBtn.addEventListener("click",resetTargetReference);
 
 els.facePerRegion.addEventListener("change",renderFaceRegions);
 els.addIkChainBtn.addEventListener("click",() => {
