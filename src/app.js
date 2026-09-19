@@ -19,7 +19,7 @@ import {
   previewRestPosePreset,
   captureRestPosePreset,
   serializeMap
-} from "./retarget-engine.js?v=20260919-leg-directions1";
+} from "./retarget-engine.js?v=20260919-rest-relative-leg2";
 
 const $ = id => document.getElementById(id);
 
@@ -1893,8 +1893,8 @@ async function applyRetarget(){
     const footCorrectionText = result.footEndEffectorCorrection
       ? ` Corrección de pies activa: ${result.footEndEffectorChains.length} piernas, solo rotación 2-bone.`
       : "";
-    const bendPlaneText = result.limbBendPlaneMode === "source-segment-directions"
-      ? " Piernas: direcciones Source muslo+tibia 1:1."
+    const bendPlaneText = result.limbBendPlaneMode === "rest-relative-segment-directions"
+      ? ` Piernas: delta angular rest→pose aplicado por segmento.${Number.isFinite(result.legDirectionErrorAvgDeg) ? ` Error dir avg ${result.legDirectionErrorAvgDeg.toFixed(2)}°, max ${result.legDirectionErrorMaxDeg.toFixed(2)}°.` : ""}`
       : result.limbBendPlaneMode === "source-plane"
         ? " Bend plane piernas: Source."
         : "";
