@@ -1675,8 +1675,11 @@ export async function bakeRetarget(options){
   // different upper-arm/forearm proportions. That makes the wrist drift
   // visibly even when the joint rotations are technically correct. Build a
   // lightweight two-bone end-effector correction from Source hand position.
+  const useArmEndEffectorCorrection = Boolean(
+    correctHands && !targetRig.cloudRigProfile
+  );
   const armCorrectionChains = [];
-  if (correctHands){
+  if (useArmEndEffectorCorrection){
     for (const side of ["Left","Right"]){
       const sUpper = resolveBone(sourceRig,`${side}Arm`,sourcePrefix);
       const sMid = resolveBone(sourceRig,`${side}ForeArm`,sourcePrefix);
@@ -2125,23 +2128,12 @@ export async function bakeRetarget(options){
       const h = Math.sqrt(hSq);
       const base = A.clone().add(dir.clone().multiplyScalar(a));
 
-      // Preserve the bend plane already produced by the raw FK retarget.
-      //
-      // Source and CloudRig use different mirrored bone rolls. Using the
-      // Source elbow/knee plane directly can pick the opposite two-bone
-      // branch on one side (the exact LeftForeArm failure shown in the frame
-      // rotation log). The uncorrected Target FK pose already has the right
-      // anatomical bend side, so use that plane as the pole reference and
-      // let the 2-bone pass correct only reach/end-effector placement.
-      let planeN = currentB.clone().sub(A)
-        .cross(currentC.clone().sub(currentB));
-
-      // Degenerate fallback: use the Source plane only if the current Target
-      // chain is perfectly straight.
+      // Source elbow plane, expressed in the static-root frame.
+      const srcBC = srcC.clone().sub(srcB);
+      if (rootDeltaInv) srcBC.applyQuaternion(rootDeltaInv);
+      let planeN = srcAB.clone().cross(srcBC);
       if (planeN.lengthSq() < EPS){
-        const srcBC = srcC.clone().sub(srcB);
-        if (rootDeltaInv) srcBC.applyQuaternion(rootDeltaInv);
-        planeN = srcAB.clone().cross(srcBC);
+        planeN = currentB.clone().sub(A).cross(currentC.clone().sub(currentB));
       }
       if (planeN.lengthSq() < EPS){
         planeN.set(0,0,1);
@@ -2159,12 +2151,13 @@ export async function bakeRetarget(options){
 
       const candidate1 = base.clone().add(perp.clone().multiplyScalar(h));
       const candidate2 = base.clone().add(perp.clone().multiplyScalar(-h));
-
-      // Pick the candidate closest to the Target's current FK elbow/knee.
-      // This prevents a left/right branch flip while preserving the already
-      // correct raw retarget orientation.
-      const desiredB = candidate1.distanceToSquared(currentB)
-        <= candidate2.distanceToSquared(currentB)
+      const sourceMidReference = A.clone().add(
+        srcAB.clone().multiplyScalar(
+          chain.targetUpperLen/Math.max(chain.sourceUpperLen,EPS)
+        )
+      );
+      const desiredB = candidate1.distanceToSquared(sourceMidReference)
+        <= candidate2.distanceToSquared(sourceMidReference)
         ? candidate1
         : candidate2;
 
@@ -2348,7 +2341,10 @@ export async function bakeRetarget(options){
     virtualChainStabilizedCount:virtualTargets.length,
     naturalHierarchyTargets:naturallyConnectedVirtualTargets,
     naturalHierarchyTargetCount:naturallyConnectedVirtualTargets.length,
-    handEndEffectorCorrection:Boolean(correctHands),
+    handEndEffectorCorrection:useArmEndEffectorCorrection,
+    handCorrectionMode:targetRig.cloudRigProfile
+      ? "blendcap-world-delta-only"
+      : (useArmEndEffectorCorrection ? "two-bone" : "disabled"),
     handEndEffectorChains:armCorrectionChains.map(c => ({
       side:c.side,
       sourceUpper:c.sourceUpperLen,
@@ -2357,7 +2353,7 @@ export async function bakeRetarget(options){
       targetFore:c.targetForeLen,
       reachScale:c.reachScale
     })),
-    limbBendPlaneMode:"target-current-fk-plane",
+    limbBendPlaneMode:"source-plane",
     footEndEffectorCorrection:Boolean(correctFeet),
     footEndEffectorChains:footCorrectionChains.map(c => ({
       side:c.side,
