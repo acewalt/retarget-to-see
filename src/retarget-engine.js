@@ -1807,6 +1807,9 @@ export async function bakeRetarget(options){
         side,
         sUpper,sMid,sEnd,
         tUpperName,tMidName,tEndName,
+        tUpperControlName:controlMirrorBySource.get(sUpper.name) || null,
+        tMidControlName:controlMirrorBySource.get(sMid.name) || null,
+        tEndControlName:controlMirrorBySource.get(sEnd.name) || null,
         sourceUpperLen,sourceForeLen,
         targetUpperLen,targetForeLen,
         reachScale:targetReach/sourceReach
@@ -1849,6 +1852,9 @@ export async function bakeRetarget(options){
         side,
         sUpper,sMid,sEnd,
         tUpperName,tMidName,tEndName,
+        tUpperControlName:controlMirrorBySource.get(sUpper.name) || null,
+        tMidControlName:controlMirrorBySource.get(sMid.name) || null,
+        tEndControlName:controlMirrorBySource.get(sEnd.name) || null,
         sourceUpperLen,sourceForeLen,
         targetUpperLen,targetForeLen,
         reachScale:targetReach/sourceReach
