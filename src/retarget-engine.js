@@ -1921,6 +1921,11 @@ export async function bakeRetarget(options){
   const localState = new Map();
   const worldOut = new Map();
 
+  // Diagnostics for the direct leg-direction solver. If these errors are
+  // effectively zero but the visible mesh still differs, the remaining
+  // problem is mapping/hierarchy rather than the leg solver itself.
+  const legDirectionErrorsDeg = [];
+
   function rebuildWorldOut(){
     worldOut.clear();
     for (const bone of sortedBones){
@@ -2253,49 +2258,111 @@ export async function bakeRetarget(options){
       let desiredEndWorldQ = originalHandQ;
 
       if (chain.kind === "LEG"){
-        // 1:1 pose transfer for legs: preserve SOURCE SEGMENT DIRECTIONS,
-        // not an absolute ankle target reconstructed from Hips matrices.
-        //
-        // For characters with different proportions there is no reason the
-        // same Hips→Foot position should imply the same knee solution. What
-        // visually defines the pose is:
-        //
-        //   Source thigh direction = Knee - UpLeg
-        //   Source shin direction  = Foot - Knee
-        //
-        // Rebuild those two directions using the Target's own bind lengths.
-        // This guarantees the same hip/knee bend while preserving Target
-        // proportions and avoids the alternate IK solution seen in SitToStand.
-        let sourceUpperDir = srcB.clone().sub(srcA);
-        let sourceLowerDir = srcC.clone().sub(srcB);
-
-        // Whole-object yaw is baked separately on the Target root, so remove
-        // that yaw from the limb directions before solving in the Target's
-        // static-root frame.
-        if (rootDeltaInv){
-          sourceUpperDir.applyQuaternion(rootDeltaInv);
-          sourceLowerDir.applyQuaternion(rootDeltaInv);
-        }
+        const sUpperRest = sourceRest.get(chain.sUpper.name);
+        const sMidRest = sourceRest.get(chain.sMid.name);
+        const sEndRest = sourceRest.get(chain.sEnd.name);
+        const tUpperRest = targetRig.rest.get(chain.tUpperName);
+        const tMidRest = targetRig.rest.get(chain.tMidName);
+        const tEndRest = targetRig.rest.get(chain.tEndName);
 
         if (
-          sourceUpperDir.lengthSq() > EPS
-          && sourceLowerDir.lengthSq() > EPS
+          sUpperRest && sMidRest && sEndRest
+          && tUpperRest && tMidRest && tEndRest
         ){
-          sourceUpperDir.normalize();
-          sourceLowerDir.normalize();
+          // Source segment directions in REST and POSE.
+          let sUpperRestDir = sMidRest.worldPosition.clone()
+            .sub(sUpperRest.worldPosition);
+          let sLowerRestDir = sEndRest.worldPosition.clone()
+            .sub(sMidRest.worldPosition);
+          let sUpperPoseDir = srcB.clone().sub(srcA);
+          let sLowerPoseDir = srcC.clone().sub(srcB);
 
-          desiredKneeReference = A.clone().add(
-            sourceUpperDir.multiplyScalar(chain.targetUpperLen)
-          );
+          // Target segment directions in its OWN rest pose.
+          let tUpperRestDir = tMidRest.worldPosition.clone()
+            .sub(tUpperRest.worldPosition);
+          let tLowerRestDir = tEndRest.worldPosition.clone()
+            .sub(tMidRest.worldPosition);
 
-          desiredC = desiredKneeReference.clone().add(
-            sourceLowerDir.multiplyScalar(chain.targetForeLen)
-          );
+          if (
+            sUpperRestDir.lengthSq() > EPS
+            && sLowerRestDir.lengthSq() > EPS
+            && sUpperPoseDir.lengthSq() > EPS
+            && sLowerPoseDir.lengthSq() > EPS
+            && tUpperRestDir.lengthSq() > EPS
+            && tLowerRestDir.lengthSq() > EPS
+          ){
+            sUpperRestDir.normalize();
+            sLowerRestDir.normalize();
+            sUpperPoseDir.normalize();
+            sLowerPoseDir.normalize();
+            tUpperRestDir.normalize();
+            tLowerRestDir.normalize();
 
-          // Foot orientation remains a regular delta-from-rest transfer.
-          // Position comes from the exact two segment directions above.
-          const sourceEndRest = sourceRest.get(chain.sEnd.name);
-          if (sourceEndRest){
+            // Remove global Target-root yaw from Source pose directions,
+            // because that yaw is baked separately onto the Target object.
+            if (rootDeltaInv){
+              sUpperPoseDir.applyQuaternion(rootDeltaInv).normalize();
+              sLowerPoseDir.applyQuaternion(rootDeltaInv).normalize();
+            }
+
+            // Transfer the SOURCE change-from-rest rather than the absolute
+            // Source world direction. This preserves each rig's own bind
+            // orientation while reproducing the same thigh/shin articulation.
+            const upperDelta = new THREE.Quaternion().setFromUnitVectors(
+              sUpperRestDir,
+              sUpperPoseDir
+            );
+            const lowerDelta = new THREE.Quaternion().setFromUnitVectors(
+              sLowerRestDir,
+              sLowerPoseDir
+            );
+
+            const wantedUpperDir = tUpperRestDir.clone()
+              .applyQuaternion(upperDelta)
+              .normalize();
+            const wantedLowerDir = tLowerRestDir.clone()
+              .applyQuaternion(lowerDelta)
+              .normalize();
+
+            // 1) Force Thigh→Knee to the desired direction.
+            let upperWorldQ = worldQuaternionOf(chain.tUpperName);
+            let upperPos = worldPositionOf(chain.tUpperName);
+            let midPos = worldPositionOf(chain.tMidName);
+            if (upperWorldQ && upperPos && midPos){
+              const currentUpperDir = midPos.clone().sub(upperPos);
+              if (currentUpperDir.lengthSq() > EPS){
+                const swingUpper = new THREE.Quaternion().setFromUnitVectors(
+                  currentUpperDir.normalize(),
+                  wantedUpperDir
+                );
+                setBoneWorldQuaternion(
+                  chain.tUpperName,
+                  swingUpper.multiply(upperWorldQ).normalize()
+                );
+                rebuildWorldOut();
+              }
+            }
+
+            // 2) Force Knee→Foot independently after the upper segment moved.
+            let midWorldQ = worldQuaternionOf(chain.tMidName);
+            midPos = worldPositionOf(chain.tMidName);
+            let endPos = worldPositionOf(chain.tEndName);
+            if (midWorldQ && midPos && endPos){
+              const currentLowerDir = endPos.clone().sub(midPos);
+              if (currentLowerDir.lengthSq() > EPS){
+                const swingLower = new THREE.Quaternion().setFromUnitVectors(
+                  currentLowerDir.normalize(),
+                  wantedLowerDir
+                );
+                setBoneWorldQuaternion(
+                  chain.tMidName,
+                  swingLower.multiply(midWorldQ).normalize()
+                );
+                rebuildWorldOut();
+              }
+            }
+
+            // 3) Preserve Source foot rotation as delta-from-rest.
             const sourceEndPoseQ = new THREE.Quaternion();
             chain.sEnd.matrixWorld.decompose(
               new THREE.Vector3(),
@@ -2304,7 +2371,7 @@ export async function bakeRetarget(options){
             );
             let endDeltaQ = quatScaledDelta(
               sourceEndPoseQ,
-              sourceEndRest.worldQuaternion,
+              sEndRest.worldQuaternion,
               1
             );
             if (rootDeltaInv){
@@ -2312,12 +2379,59 @@ export async function bakeRetarget(options){
                 .multiply(endDeltaQ)
                 .normalize();
             }
-            const targetEndRest = targetRig.rest.get(chain.tEndName);
-            if (targetEndRest){
-              desiredEndWorldQ = endDeltaQ
-                .multiply(targetEndRest.worldQuaternion.clone())
-                .normalize();
+            desiredEndWorldQ = endDeltaQ
+              .multiply(tEndRest.worldQuaternion.clone())
+              .normalize();
+
+            const endBone = targetRig.boneMap.get(chain.tEndName);
+            const endState = localState.get(chain.tEndName);
+            if (endBone && endState){
+              const endParentWorld = parentWorldForBone(
+                endBone,
+                worldOut,
+                tEndRest
+              );
+              const endParentQ = new THREE.Quaternion();
+              endParentWorld.decompose(
+                new THREE.Vector3(),
+                endParentQ,
+                new THREE.Vector3()
+              );
+              endState.quaternion.copy(
+                endParentQ.invert()
+                  .multiply(desiredEndWorldQ)
+                  .normalize()
+              );
+              rebuildWorldOut();
             }
+
+            // Measure the actual result after all three operations.
+            const finalUpper = worldPositionOf(chain.tMidName)
+              ?.sub(worldPositionOf(chain.tUpperName) || new THREE.Vector3());
+            const finalLower = worldPositionOf(chain.tEndName)
+              ?.sub(worldPositionOf(chain.tMidName) || new THREE.Vector3());
+            if (
+              finalUpper && finalLower
+              && finalUpper.lengthSq() > EPS
+              && finalLower.lengthSq() > EPS
+            ){
+              const upperErr = THREE.MathUtils.radToDeg(
+                Math.acos(THREE.MathUtils.clamp(
+                  finalUpper.normalize().dot(wantedUpperDir),
+                  -1,1
+                ))
+              );
+              const lowerErr = THREE.MathUtils.radToDeg(
+                Math.acos(THREE.MathUtils.clamp(
+                  finalLower.normalize().dot(wantedLowerDir),
+                  -1,1
+                ))
+              );
+              legDirectionErrorsDeg.push(upperErr,lowerErr);
+            }
+
+            // Leg solved directly. Do not run the generic two-bone solver.
+            continue;
           }
         }
       }
@@ -2581,7 +2695,13 @@ export async function bakeRetarget(options){
       targetFore:c.targetForeLen,
       reachScale:c.reachScale
     })),
-    limbBendPlaneMode:"source-segment-directions",
+    limbBendPlaneMode:"rest-relative-segment-directions",
+    legDirectionErrorAvgDeg:legDirectionErrorsDeg.length
+      ? legDirectionErrorsDeg.reduce((a,b)=>a+b,0)/legDirectionErrorsDeg.length
+      : null,
+    legDirectionErrorMaxDeg:legDirectionErrorsDeg.length
+      ? Math.max(...legDirectionErrorsDeg)
+      : null,
     footEndEffectorCorrection:Boolean(correctFeet),
     footEndEffectorChains:footCorrectionChains.map(c => ({
       side:c.side,
