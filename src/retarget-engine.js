@@ -1742,7 +1742,7 @@ export async function bakeRetarget(options){
 
   const targetRest = targetRestOverride instanceof Map && targetRestOverride.size
     ? targetRestOverride
-    : targetRest;
+    : targetRig.rest;
 
   const records = actualPairRecords(pairs,sourceRig,targetRig,sourcePrefix,targetPrefix);
   if (!records.length) throw new Error("Ningún par del mapa existe en ambos FBX.");
