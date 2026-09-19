@@ -20,7 +20,7 @@ import {
   captureRestPosePreset,
   captureCurrentRigReference,
   serializeMap
-} from "./retarget-engine.js?v=20260919-target-reference3";
+} from "./retarget-engine.js?v=20260919-current-frame1";
 
 const $ = id => document.getElementById(id);
 
@@ -362,12 +362,15 @@ class RigViewport{
     if (!this.rig || !this.rig.bones.length) return;
     this.rig.root.updateMatrixWorld(true);
 
-    // Frame the rendered character, not every control/pole/helper bone.
-    // CloudRig contains distant controls that made an identical character
-    // appear artificially smaller than its Mixamo version.
-    let box = this.rig.visualRest?.box?.clone?.() || null;
-    let initialized = Boolean(box && !box.isEmpty());
+    // Frame what is ACTUALLY being rendered right now. Box3 precise mode
+    // evaluates SkinnedMesh vertices in their current pose and ignores
+    // non-rendered pole/control bones. Cached rest bounds are useful for
+    // retarget scale, but not for a viewport that may currently show frame 0
+    // of an animation or an edited Target reference pose.
+    let box = new THREE.Box3().setFromObject(this.rig.root,true);
+    let initialized = !box.isEmpty();
 
+    // Fallback only for skeleton-only FBXs with no renderable geometry.
     if (!initialized){
       box = new THREE.Box3();
       const p = new THREE.Vector3();
@@ -379,7 +382,9 @@ class RigViewport{
         p.setFromMatrixPosition(bone.matrixWorld);
         if (!initialized){
           box.min.copy(p);box.max.copy(p);initialized=true;
-        } else box.expandByPoint(p);
+        } else {
+          box.expandByPoint(p);
+        }
       }
     }
     if (!initialized) return;
@@ -387,7 +392,13 @@ class RigViewport{
     const center = box.getCenter(new THREE.Vector3());
     const size = box.getSize(new THREE.Vector3());
     const radius = Math.max(size.length()*.5,.1);
-    const distance = radius / Math.tan(THREE.MathUtils.degToRad(this.camera.fov*.5)) * 1.25;
+
+    // Give the model deliberate breathing room. 1.25 was too tight,
+    // especially with the linked cameras and crouched/sitting poses.
+    const framePadding = 1.60;
+    const distance = radius
+      / Math.tan(THREE.MathUtils.degToRad(this.camera.fov*.5))
+      * framePadding;
     const direction = new THREE.Vector3(1,.45,1).normalize();
 
     this.frameCenter.copy(center);
@@ -766,10 +777,13 @@ async function loadFbx(file,kind){
     state.targetReferenceSourceTime = null;
     if (els.useTargetReference) els.useTargetReference.checked = false;
     state.targetRestOverride = null;
-    sourceView.setRig(rig);
     els.sourceDropHint.hidden = true;
     populateSourceClips();
+
+    // Put Source at its real frame 0 BEFORE framing the viewport.
     if (state.sourceClip) activateClip(rig,state.sourceClip);
+    sourceView.setRig(rig);
+
     els.sourceMeta.textContent = `${file.name} · ${rig.bones.length} huesos · ${rig.animations.length} clips${rig.visualRest?.valid ? ` · bounds ${rig.visualRest.skinnedMeshCount || 0} skinned` : ""}`;
   } else {
     state.targetRig = rig;
