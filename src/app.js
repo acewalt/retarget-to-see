@@ -19,7 +19,7 @@ import {
   previewRestPosePreset,
   captureRestPosePreset,
   serializeMap
-} from "./retarget-engine.js?v=20260919-target-fk-bend-plane1";
+} from "./retarget-engine.js?v=20260919-cloudrig-no-arm2bone1";
 
 const $ = id => document.getElementById(id);
 
@@ -1885,14 +1885,16 @@ async function applyRetarget(){
     const naturalHierarchyText = result.naturalHierarchyTargetCount
       ? ` Jerarquía DEF nativa respetada: ${result.naturalHierarchyTargetCount} joints; sin Location extra.`
       : "";
-    const handCorrectionText = result.handEndEffectorCorrection
-      ? ` Corrección de manos activa: ${result.handEndEffectorChains.length} brazos, solo rotación 2-bone.`
-      : "";
+    const handCorrectionText = result.handCorrectionMode === "blendcap-world-delta-only"
+      ? " Brazos CloudRig: world-delta FK puro; 2-bone desactivado."
+      : result.handEndEffectorCorrection
+        ? ` Corrección de manos activa: ${result.handEndEffectorChains.length} brazos, solo rotación 2-bone.`
+        : "";
     const footCorrectionText = result.footEndEffectorCorrection
       ? ` Corrección de pies activa: ${result.footEndEffectorChains.length} piernas, solo rotación 2-bone.`
       : "";
-    const bendPlaneText = result.limbBendPlaneMode === "target-current-fk-plane"
-      ? " Bend plane: Target FK actual (sin invertir lado)."
+    const bendPlaneText = result.limbBendPlaneMode === "source-plane"
+      ? " Bend plane piernas: Source."
       : "";
     const splitRootText = result.splitRootMappings?.length
       ? ` Set-as-Root separado: ${result.splitRootMappings.join("; ")} (ROT al deform, LOC al objeto).`
