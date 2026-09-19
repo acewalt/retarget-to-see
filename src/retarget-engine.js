@@ -2194,6 +2194,10 @@ export async function bakeRetarget(options){
         srcAC.applyQuaternion(rootDeltaInv);
         srcAB.applyQuaternion(rootDeltaInv);
       }
+      if (sourceBodyFrame && targetBodyFrame){
+        srcAC = mapVectorBetweenBodyFrames(srcAC,sourceBodyFrame,targetBodyFrame);
+        srcAB = mapVectorBetweenBodyFrames(srcAB,sourceBodyFrame,targetBodyFrame);
+      }
 
       const A = worldPositionOf(chain.tUpperName);
       const currentB = worldPositionOf(chain.tMidName);
@@ -2229,9 +2233,13 @@ export async function bakeRetarget(options){
       const h = Math.sqrt(hSq);
       const base = A.clone().add(dir.clone().multiplyScalar(a));
 
-      // Source elbow plane, expressed in the static-root frame.
-      const srcBC = srcC.clone().sub(srcB);
+      // Source elbow/knee plane, expressed in the Target's static REST
+      // body frame. This is the key difference from raw world-vector copying.
+      let srcBC = srcC.clone().sub(srcB);
       if (rootDeltaInv) srcBC.applyQuaternion(rootDeltaInv);
+      if (sourceBodyFrame && targetBodyFrame){
+        srcBC = mapVectorBetweenBodyFrames(srcBC,sourceBodyFrame,targetBodyFrame);
+      }
       let planeN = srcAB.clone().cross(srcBC);
       if (planeN.lengthSq() < EPS){
         planeN = currentB.clone().sub(A).cross(currentC.clone().sub(currentB));
