@@ -293,14 +293,14 @@
       <section class="panel-section">
         <h2>5. Salida</h2>
         <div class="button-row">
-          <button id="exportGlbBtn" class="secondary" type="button" disabled>Descargar GLB</button>
+          <button id="exportGlbBtn" class="ghost" type="button" disabled>GLB experimental</button>
           <button id="exportClipBtn" class="ghost" type="button" disabled>Animación JSON</button>
         </div>
         <button id="exportOriginalRigBtn" class="primary big" type="button" disabled>
-          Action para RIG original (.json)
+          FBX Action · RIG original
         </button>
         <p class="hint">
-          Genera una Action horneada para el armature original del Target. Luego usa <a href="./blender_original_action_importer.py" download>blender_original_action_importer.py</a> en Blender > Scripting y selecciona el JSON descargado.
+          Exporta el mismo esqueleto/hierarquía del Target importado, sin reconstruirlo y sin malla, con la Action retargeteada dentro del FBX. En Blender importa este FBX y usa su Action sobre tu armature original.
         </p>
         <div class="progress-wrap" id="progressWrap" hidden>
           <div class="progress-track"><div id="progressBar"></div></div>
@@ -320,6 +320,6 @@
     Port web del retargeting inspirado en <a href="https://github.com/Arcomade/BlendCap" target="_blank" rel="noreferrer">BlendCap</a> · GPL-3.0 · sin garantía.
   </footer>
 
-  <script type="module" src="./src/app.js?v=20260919-original-rig-action2"></script>
+  <script type="module" src="./src/app.js?v=20260919-original-target-fbx1"></script>
 </body>
 </html>
