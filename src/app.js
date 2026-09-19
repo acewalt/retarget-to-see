@@ -19,7 +19,7 @@ import {
   previewRestPosePreset,
   captureRestPosePreset,
   serializeMap
-} from "./retarget-engine.js?v=20260919-hips-pose-foot1";
+} from "./retarget-engine.js?v=20260919-hips-basis-foot1";
 
 const $ = id => document.getElementById(id);
 
