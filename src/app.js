@@ -20,7 +20,7 @@ import {
   captureRestPosePreset,
   captureCurrentRigReference,
   serializeMap
-} from "./retarget-engine.js?v=20260919-original-rig-action2";
+} from "./retarget-engine.js?v=20260919-original-target-fbx1";
 
 const $ = id => document.getElementById(id);
 
@@ -2926,6 +2926,129 @@ async function convertIk(){
   }
 }
 
+
+let originalRigFbxExporterPromise = null;
+
+async function loadOriginalRigFbxExporter(){
+  if (!originalRigFbxExporterPromise){
+    originalRigFbxExporterPromise = import(
+      "https://esm.sh/@comfyorg/fbx-exporter-three@1.0.1?bundle&external=three"
+    );
+  }
+
+  const mod = await originalRigFbxExporterPromise;
+  if (!mod?.FBXExporter){
+    throw new Error("No pude cargar el exportador FBX del navegador.");
+  }
+  return mod.FBXExporter;
+}
+
+function countExportableOriginalRigNodes(root){
+  let bones = 0;
+  let groups = 0;
+  let skippedMeshes = 0;
+
+  root.traverse(obj => {
+    if (obj.isMesh){
+      skippedMeshes++;
+      return;
+    }
+    if (obj.isBone) bones++;
+    else groups++;
+  });
+
+  return {bones,groups,skippedMeshes};
+}
+
+async function exportOriginalTargetRigFbx(){
+  if (!state.targetRig || !state.retargetClip || state.busy) return;
+
+  const rig = state.targetRig;
+  const clip = state.retargetClip;
+  const savedTime = state.currentTime;
+
+  state.playing = false;
+  els.playBtn.textContent = "▶";
+  setBusy(true);
+  setStatus("Preparando FBX con el esqueleto ORIGINAL del Target…");
+
+  try{
+    // This is the important difference from the experimental GLB path:
+    // do NOT build a clean/deform skeleton and do NOT change parenting.
+    // Export the exact Bone/Object3D hierarchy that came from Target FBX.
+    resetRigToRest(rig);
+    rig.root.updateMatrixWorld(true);
+
+    const hierarchy = countExportableOriginalRigNodes(rig.root);
+    if (hierarchy.bones !== rig.bones.length){
+      throw new Error(
+        "El conteo del esqueleto cambió antes de exportar: "
+        + hierarchy.bones + " vs " + rig.bones.length + " huesos."
+      );
+    }
+
+    const FBXExporter = await loadOriginalRigFbxExporter();
+    const exporter = new FBXExporter();
+    const fps = Math.max(1,Number(els.fpsInput.value) || 30);
+
+    // Skeleton/action-only FBX. Meshes are deliberately excluded: they are
+    // unnecessary for transferring the Action and were the source of the
+    // previous GLB skin/bind problems. Every original Bone and intermediate
+    // Group/Null stays in the exact Target hierarchy and parent space.
+    const bytes = exporter.parseSync(rig.root,{
+      preset:"blender",
+      unitScale:100,
+      bakeSpaceTransform:false,
+      version:7400,
+      fps,
+      animations:[clip],
+      includeAnimations:true,
+      embedTextures:false,
+      onlyVisible:false,
+      objectFilter:(obj) => !obj.isMesh && !obj.isLight && !obj.isCamera,
+      customProperties:false,
+      creator:"Retarget to See - original Target rig action"
+    });
+
+    if (!(bytes instanceof Uint8Array) || bytes.byteLength < 1024){
+      throw new Error("El exportador FBX devolvió un archivo vacío o incompleto.");
+    }
+
+    const name = safeBaseName(rig.fileName || "target")
+      + "_retargeted_originalRig.fbx";
+
+    downloadBlob(
+      new Blob([bytes],{type:"application/octet-stream"}),
+      name
+    );
+
+    setStatus(
+      "FBX RIG original exportado: " + name
+      + ". Se reutilizó la jerarquía Target tal cual: "
+      + hierarchy.bones + " huesos + " + hierarchy.groups
+      + " nodos/parents; " + hierarchy.skippedMeshes
+      + " malla(s) omitidas. La Action "" + clip.name
+      + "" va dentro del FBX. No se creó ningún DeformExport ni se cambiaron parent spaces.",
+      "success"
+    );
+  }catch(err){
+    console.error(err);
+    setStatus(
+      "Falló el FBX para RIG original: " + (err.message || err),
+      "error"
+    );
+  }finally{
+    resetRigToRest(rig);
+    activateClip(rig,clip);
+    setRigTime(
+      rig,
+      Math.max(0,Math.min(savedTime,clip.duration || 0))
+    );
+    rig.root.updateMatrixWorld(true);
+    setBusy(false);
+  }
+}
+
 async function exportGlb(){
   if (!state.targetRig || !state.retargetClip) return;
   const clip = state.retargetClip;
@@ -3375,7 +3498,7 @@ els.applyBtn.addEventListener("click",applyRetarget);
 els.convertIkBtn.addEventListener("click",convertIk);
 els.exportGlbBtn.addEventListener("click",exportGlb);
 els.exportClipBtn.addEventListener("click",exportClipJson);
-els.exportOriginalRigBtn.addEventListener("click",exportOriginalRigActionPackage);
+els.exportOriginalRigBtn.addEventListener("click",exportOriginalTargetRigFbx);
 els.frameSourceBtn.addEventListener("click",() => {
   sourceView.frame();
   syncViewportCamera(sourceView,targetView);
