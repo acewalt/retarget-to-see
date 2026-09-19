@@ -7,7 +7,6 @@
  * execute Blender/bpy.
  */
 import * as THREE from "three";
-// ARM SOLVER: restored user-confirmed post-CloudRig-hierarchy behavior.
 
 const EPS = 1e-8;
 const FACE_REGIONS = ["jaw","gaze","lids","brows","lips","cheeks","nose","tongue"];
@@ -1504,6 +1503,30 @@ function actualPairRecords(pairs,sourceRig,targetRig,sourcePrefix,targetPrefix){
       sourceRest:sourceRig.rest.get(sourceBone.name),
       targetRest:targetRig.rest.get(targetBone.name)
     });
+
+    // CloudRig FK controls are separate from the DEF chain in exported FBX.
+    // Mirror the same Source motion onto the actual requested FK control too.
+    // Example:
+    //   mixamorig1:LeftForeArm -> FK-Forearm.L   (control track)
+    //                              + DEF-Forearm_1.L (mesh track)
+    const directControl = resolveBone(targetRig,raw.target,targetPrefix);
+    if (
+      targetRig.cloudRigProfile
+      && directControl
+      && directControl !== targetBone
+      && /^FK-/i.test(directControl.name)
+    ){
+      out.push({
+        ...raw,
+        pairIndex,
+        sourceBone,
+        targetBone:directControl,
+        targetRoot:false,
+        _control_mirror:true,
+        sourceRest:sourceRig.rest.get(sourceBone.name),
+        targetRest:targetRig.rest.get(directControl.name)
+      });
+    }
   }
   return out;
 }
@@ -1806,13 +1829,6 @@ export async function bakeRetarget(options){
   const localState = new Map();
   const worldOut = new Map();
 
-  // Keep elbow/knee bend side stable across frames. A two-bone solution has
-  // two mathematically valid bend positions. Choosing by Source coordinates
-  // can flip one mirrored arm on rigs with different local axes. We instead
-  // preserve the Target's already-valid FK bend side and then keep temporal
-  // continuity from frame to frame.
-  const previousLimbBend = new Map();
-
   function rebuildWorldOut(){
     worldOut.clear();
     for (const bone of sortedBones){
@@ -1858,56 +1874,6 @@ export async function bakeRetarget(options){
     );
     return true;
   }
-
-  function anatomicalFrame(leftPos,rightPos,hipsPos,chestPos){
-    if (!leftPos || !rightPos || !hipsPos || !chestPos) return null;
-
-    // X = anatomical right, Y = torso up, Z = forward/back.  This frame is
-    // built from JOINT POSITIONS rather than bone quaternions, so it is not
-    // affected by Mixamo/CloudRig bone-roll differences.
-    const x = rightPos.clone().sub(leftPos);
-    const ySeed = chestPos.clone().sub(hipsPos);
-    if (x.lengthSq() < EPS || ySeed.lengthSq() < EPS) return null;
-    x.normalize();
-    ySeed.normalize();
-
-    const z = x.clone().cross(ySeed);
-    if (z.lengthSq() < EPS) return null;
-    z.normalize();
-
-    const y = z.clone().cross(x);
-    if (y.lengthSq() < EPS) return null;
-    y.normalize();
-
-    return {x,y,z};
-  }
-
-  function mapVectorFrame(v,fromFrame,toFrame){
-    if (!fromFrame || !toFrame) return v.clone();
-    const cx = v.dot(fromFrame.x);
-    const cy = v.dot(fromFrame.y);
-    const cz = v.dot(fromFrame.z);
-    return toFrame.x.clone().multiplyScalar(cx)
-      .add(toFrame.y.clone().multiplyScalar(cy))
-      .add(toFrame.z.clone().multiplyScalar(cz));
-  }
-
-  // Geometric torso anchors used to transfer arm vectors.  Using a torso
-  // frame fixes the mirrored-arm problem without relying on arbitrary local
-  // bone roll.  The Source/Target frames are rebuilt every sampled frame.
-  const srcFrameBones = {
-    left:resolveBone(sourceRig,"LeftShoulder",sourcePrefix),
-    right:resolveBone(sourceRig,"RightShoulder",sourcePrefix),
-    hips:resolveBone(sourceRig,"Hips",sourcePrefix),
-    chest:resolveBone(sourceRig,"Spine2",sourcePrefix)
-      || resolveBone(sourceRig,"Spine1",sourcePrefix)
-  };
-  const tgtFrameNames = {
-    left:srcFrameBones.left ? sourceToTarget.get(srcFrameBones.left.name) : null,
-    right:srcFrameBones.right ? sourceToTarget.get(srcFrameBones.right.name) : null,
-    hips:srcFrameBones.hips ? sourceToTarget.get(srcFrameBones.hips.name) : null,
-    chest:srcFrameBones.chest ? sourceToTarget.get(srcFrameBones.chest.name) : null
-  };
 
   for (let frame=0;frame<frameCount;frame++){
     const t = times[frame];
@@ -2134,10 +2100,9 @@ export async function bakeRetarget(options){
     }
 
     // PASS 1C: two-bone end-effector correction for arms and legs.
-    // This intentionally uses the same static-root-space transfer that was
-    // working correctly immediately after the explicit CloudRig DEF hierarchy
-    // was added. Do not remap arm vectors through a torso frame here: that
-    // changed one mirrored arm's bend/orientation.
+    // Match Source wrist/ankle position normalized by total limb reach, then
+    // solve the Target elbow/knee using the Source bend plane. Only rotations
+    // are changed: CloudRig DEF local translations remain untouched.
     for (const chain of limbCorrectionChains){
       const srcA = new THREE.Vector3().setFromMatrixPosition(chain.sUpper.matrixWorld);
       const srcB = new THREE.Vector3().setFromMatrixPosition(chain.sMid.matrixWorld);
@@ -2184,7 +2149,7 @@ export async function bakeRetarget(options){
       const h = Math.sqrt(hSq);
       const base = A.clone().add(dir.clone().multiplyScalar(a));
 
-      // Source elbow/knee plane, expressed in the static-root frame.
+      // Source elbow plane, expressed in the static-root frame.
       const srcBC = srcC.clone().sub(srcB);
       if (rootDeltaInv) srcBC.applyQuaternion(rootDeltaInv);
       let planeN = srcAB.clone().cross(srcBC);
@@ -2207,11 +2172,6 @@ export async function bakeRetarget(options){
 
       const candidate1 = base.clone().add(perp.clone().multiplyScalar(h));
       const candidate2 = base.clone().add(perp.clone().multiplyScalar(-h));
-
-      // Use the Source elbow/knee direction itself to choose the correct
-      // two-bone branch. This is the exact selection that produced the
-      // user-confirmed good arm result before the later mirrored/torso-space
-      // experiments were introduced.
       const sourceMidReference = A.clone().add(
         srcAB.clone().multiplyScalar(
           chain.targetUpperLen/Math.max(chain.sourceUpperLen,EPS)
@@ -2411,8 +2371,11 @@ export async function bakeRetarget(options){
       targetFore:c.targetForeLen,
       reachScale:c.reachScale
     })),
-    armVectorFrame:"anatomical-torso-joint-frame",
-    limbBendSelection:"source-elbow-in-torso-frame; legs-target-fk-temporal",
+    fkControlMirrorTargets:[...new Set(records
+      .filter(r => r._control_mirror)
+      .map(r => r.targetBone?.name)
+      .filter(Boolean))],
+    fkControlMirrorCount:records.filter(r => r._control_mirror).length,
     footEndEffectorCorrection:Boolean(correctFeet),
     footEndEffectorChains:footCorrectionChains.map(c => ({
       side:c.side,
