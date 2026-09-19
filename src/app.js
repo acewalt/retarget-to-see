@@ -3027,8 +3027,8 @@ async function exportOriginalTargetRigFbx(){
       + ". Se reutilizó la jerarquía Target tal cual: "
       + hierarchy.bones + " huesos + " + hierarchy.groups
       + " nodos/parents; " + hierarchy.skippedMeshes
-      + " malla(s) omitidas. La Action "" + clip.name
-      + "" va dentro del FBX. No se creó ningún DeformExport ni se cambiaron parent spaces.",
+      + " malla(s) omitidas. La Action \"" + clip.name
+      + "\" va dentro del FBX. No se creó ningún DeformExport ni se cambiaron parent spaces.",
       "success"
     );
   }catch(err){
