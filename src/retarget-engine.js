@@ -247,6 +247,7 @@ export function createRigState(root, fileName=""){
     skinBoneNames,
     weightedBoneNames,
     hierarchyDriverBoneNames,
+    cloudRigProfile:false,
     rest,
     animations: Array.isArray(root.animations) ? root.animations : [],
     mixer: new THREE.AnimationMixer(root),
@@ -254,6 +255,7 @@ export function createRigState(root, fileName=""){
     activeAction: null,
     currentTime: 0
   };
+  rig.cloudRigProfile = isCloudRigExport(rig);
   return rig;
 }
 
@@ -558,8 +560,81 @@ function segmentedDeformCandidates(rig,name){
   });
 }
 
+function isCloudRigExport(rig){
+  if (!rig?.boneMap) return false;
+  const required = [
+    "TORSO-Spine",
+    "HIP-Spine",
+    "DEF-Hips",
+    "DEF-Spine",
+    "DEF-Chest",
+    "DEF-UpperArm_1L",
+    "DEF-UpperArm_1R",
+    "DEF-Thigh_1L",
+    "DEF-Thigh_1R"
+  ];
+  return required.every(name => rig.boneMap.has(name));
+}
+
+function cloudRigSide(name=""){
+  const raw = String(name);
+  if (/(?:\.L|_L|Left|left|L)$/.test(raw)) return "L";
+  if (/(?:\.R|_R|Right|right|R)$/.test(raw)) return "R";
+
+  const compact = raw.toLowerCase().replace(/[^a-z0-9]/g,"");
+  if (/left/.test(compact)) return "L";
+  if (/right/.test(compact)) return "R";
+  if (/l$/.test(compact)) return "L";
+  if (/r$/.test(compact)) return "R";
+  return "";
+}
+
+function resolveCloudRigDeformAlias(rig,shortName=""){
+  if (!isCloudRigExport(rig)) return null;
+
+  const raw = String(shortName || "");
+  const key = raw.toLowerCase().replace(/[^a-z0-9]/g,"");
+  const side = cloudRigSide(raw);
+
+  const exact = name => rig.boneMap.get(name) || null;
+  const sided = base => side ? exact(`${base}${side}`) : null;
+
+  // CloudRig FK controls are a constraint layer. In a plain FBX those
+  // constraints are absent, so retarget directly onto the SECTION ROOTS of
+  // the deform chains. Secondary _2 bones remain untouched and inherit
+  // naturally from _1, matching the hierarchy supplied by the rig.
+  if (key === "fkhead" || key === "head") return exact("DEF-Head");
+  if (key === "fkneck" || key === "neck") return exact("DEF-Neck");
+  if (key === "fkspine" || key === "spine") return exact("DEF-Spine");
+  if (key === "fkchest" || key === "chest") return exact("DEF-Chest");
+  if (key === "hipspine" || key === "fkhips" || key === "hips") return exact("DEF-Hips");
+
+  if (key.includes("shoulder")) return sided("DEF-Shoulder");
+  if (key.includes("upperarm")) return sided("DEF-UpperArm_1");
+  if (key.includes("forearm")) return sided("DEF-Forearm_1");
+  if (key.includes("hand")) return sided("DEF-Hand");
+
+  if (key.includes("thigh") || key.includes("upleg") || key.includes("upperleg")){
+    return sided("DEF-Thigh_1");
+  }
+  if (key.includes("knee") || key.includes("lowerleg") || key.includes("shin")){
+    return sided("DEF-Knee_1");
+  }
+  if (key.includes("toes") || key.includes("toebase") || key.includes("toe")){
+    // DEF-Toes can exist in the FBX skin skeleton with zero direct weight.
+    // It is still the correct anatomical endpoint of the DEF leg chain.
+    return sided("DEF-Toes");
+  }
+  if (key.includes("foot")) return sided("DEF-Foot");
+
+  return null;
+}
+
 export function resolveRetargetTargetBone(rig,shortName="",prefix=""){
   if (!rig || !shortName) return null;
+
+  const cloudRigAlias = resolveCloudRigDeformAlias(rig,shortName);
+  if (cloudRigAlias) return cloudRigAlias;
 
   const direct = resolveBone(rig,shortName,prefix);
   const deformNames = deformBoneNameSet(rig);
