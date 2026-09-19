@@ -20,7 +20,7 @@ import {
   captureRestPosePreset,
   captureCurrentRigReference,
   serializeMap
-} from "./retarget-engine.js?v=20260919-preserve-bind1";
+} from "./retarget-engine.js?v=20260919-deform-export1";
 
 const $ = id => document.getElementById(id);
 
@@ -682,6 +682,361 @@ function installGlbSafeMaterials(root){
         obj.material = material;
       }
     }
+  };
+}
+
+function nearestWeightedAncestor(bone,weightedSet){
+  let p = bone?.parent || null;
+  while (p){
+    if (p.isBone && weightedSet.has(p.name)) return p;
+    p = p.parent;
+  }
+  return null;
+}
+
+function uniqueClipTimes(clip){
+  if (!clip?.tracks?.length){
+    return [0];
+  }
+  const first = clip.tracks.find(t => t.times?.length)?.times;
+  if (first?.length){
+    const out = Array.from(first,Number);
+    if (out[0] !== 0) out.unshift(0);
+    const duration = Number(clip.duration || 0);
+    if (duration > 0 && Math.abs(out[out.length-1]-duration) > 1e-6){
+      out.push(duration);
+    }
+    return out;
+  }
+  return [0];
+}
+
+function makeSafeExportMaterialForMesh(mesh){
+  const original = originalMaterialByMesh.get(mesh) || mesh.material;
+  if (Array.isArray(original)){
+    return original.map(m => makeGlbSafeMaterial(m));
+  }
+  return makeGlbSafeMaterial(original);
+}
+
+function remapSkinIndicesForCleanSkeleton(geometry,oldSkeleton,oldToNew){
+  const cloned = geometry.clone();
+  const oldIndex = geometry.getAttribute("skinIndex");
+  const oldWeight = geometry.getAttribute("skinWeight");
+  if (!oldIndex || !oldWeight) return cloned;
+
+  const values = new Uint16Array(oldIndex.count * 4);
+
+  for (let i=0;i<oldIndex.count;i++){
+    const src = [
+      Math.round(oldIndex.getX(i)),
+      Math.round(oldIndex.getY(i)),
+      Math.round(oldIndex.getZ(i)),
+      Math.round(oldIndex.getW(i))
+    ];
+    const weights = [
+      oldWeight.getX(i),
+      oldWeight.getY(i),
+      oldWeight.getZ(i),
+      oldWeight.getW(i)
+    ];
+
+    for (let j=0;j<4;j++){
+      if (weights[j] <= 1e-8){
+        values[i*4+j] = 0;
+        continue;
+      }
+      const mapped = oldToNew.get(src[j]);
+      if (mapped == null){
+        throw new Error(
+          `Skin weight apunta a hueso no incluido en export limpio: índice ${src[j]}.`
+        );
+      }
+      values[i*4+j] = mapped;
+    }
+  }
+
+  cloned.setAttribute("skinIndex",new THREE.Uint16BufferAttribute(values,4));
+  return cloned;
+}
+
+function decomposeRelativeWorld(childWorld,parentWorld){
+  const local = parentWorld
+    ? parentWorld.clone().invert().multiply(childWorld)
+    : childWorld.clone();
+
+  const p = new THREE.Vector3();
+  const q = new THREE.Quaternion();
+  const s = new THREE.Vector3();
+  local.decompose(p,q,s);
+  q.normalize();
+  return {p,q,s};
+}
+
+function buildCleanDeformExport(targetRig,clip){
+  if (!targetRig?.root || !clip){
+    throw new Error("No hay Target/clip para construir export deform-only.");
+  }
+
+  resetRigToRest(targetRig);
+  targetRig.root.updateMatrixWorld(true);
+
+  const sourceMeshes = [];
+  targetRig.root.traverse(obj => {
+    if (obj.isSkinnedMesh && obj.skeleton) sourceMeshes.push(obj);
+  });
+  if (!sourceMeshes.length){
+    throw new Error("El Target no contiene SkinnedMesh exportable.");
+  }
+
+  const exportRoot = new THREE.Group();
+  exportRoot.name = safeBaseName(targetRig.fileName || "Target") + "_DeformExport";
+
+  const allTracks = [];
+  let totalBones = 0;
+  let totalMeshes = 0;
+
+  // CloudRig x1.fbx uses one SkinnedMesh. This loop also supports several
+  // independent skins by creating one clean deform skeleton per source skin.
+  for (let meshIndex=0;meshIndex<sourceMeshes.length;meshIndex++){
+    const srcMesh = sourceMeshes[meshIndex];
+    const oldSkeleton = srcMesh.skeleton;
+    const weightedOldIndices = new Set();
+
+    const skinIndex = srcMesh.geometry?.getAttribute?.("skinIndex");
+    const skinWeight = srcMesh.geometry?.getAttribute?.("skinWeight");
+    if (!skinIndex || !skinWeight) continue;
+
+    const count = Math.min(skinIndex.count,skinWeight.count);
+    for (let i=0;i<count;i++){
+      const ids = [
+        Math.round(skinIndex.getX(i)),
+        Math.round(skinIndex.getY(i)),
+        Math.round(skinIndex.getZ(i)),
+        Math.round(skinIndex.getW(i))
+      ];
+      const ws = [
+        skinWeight.getX(i),
+        skinWeight.getY(i),
+        skinWeight.getZ(i),
+        skinWeight.getW(i)
+      ];
+      for (let j=0;j<4;j++){
+        if (ws[j] > 1e-8) weightedOldIndices.add(ids[j]);
+      }
+    }
+
+    const orderedOldIndices = [...weightedOldIndices]
+      .filter(i => oldSkeleton.bones[i])
+      .sort((a,b) => {
+        const da = targetRig.rest.get(oldSkeleton.bones[a].name)?.depth ?? 0;
+        const db = targetRig.rest.get(oldSkeleton.bones[b].name)?.depth ?? 0;
+        return da-db;
+      });
+
+    if (!orderedOldIndices.length) continue;
+
+    const oldToNew = new Map();
+    orderedOldIndices.forEach((oldIndex,newIndex) => oldToNew.set(oldIndex,newIndex));
+
+    const weightedNames = new Set(
+      orderedOldIndices.map(i => oldSkeleton.bones[i].name)
+    );
+
+    const cleanByName = new Map();
+    const cleanBones = [];
+
+    // Build a hierarchy containing ONLY weighted deform bones. Any CloudRig
+    // control/mechanism parents are collapsed into each deform bone's local
+    // rest matrix.
+    for (const oldIndex of orderedOldIndices){
+      const oldBone = oldSkeleton.bones[oldIndex];
+      const clean = new THREE.Bone();
+      clean.name = oldBone.name;
+
+      const weightedParent = nearestWeightedAncestor(oldBone,weightedNames);
+      const rest = targetRig.rest.get(oldBone.name);
+      if (!rest) throw new Error(`Sin rest para ${oldBone.name}.`);
+
+      const parentRest = weightedParent
+        ? targetRig.rest.get(weightedParent.name)?.world
+        : null;
+      const d = decomposeRelativeWorld(rest.world,parentRest);
+
+      clean.position.copy(d.p);
+      clean.quaternion.copy(d.q);
+      clean.scale.copy(d.s);
+      clean.updateMatrix();
+
+      if (weightedParent){
+        cleanByName.get(weightedParent.name)?.add(clean);
+      } else {
+        exportRoot.add(clean);
+      }
+
+      cleanByName.set(oldBone.name,clean);
+      cleanBones.push(clean);
+    }
+
+    exportRoot.updateMatrixWorld(true);
+
+    const geometry = remapSkinIndicesForCleanSkeleton(
+      srcMesh.geometry,
+      oldSkeleton,
+      oldToNew
+    );
+    const material = makeSafeExportMaterialForMesh(srcMesh);
+    const cleanMesh = new THREE.SkinnedMesh(geometry,material);
+    cleanMesh.name = srcMesh.name || `Mesh_${meshIndex}`;
+
+    // Preserve geometry's original mesh-local coordinate frame in world
+    // meters, but detach it from CloudRig's object/control hierarchy.
+    srcMesh.updateMatrixWorld(true);
+    const meshWorld = srcMesh.matrixWorld.clone();
+    meshWorld.decompose(
+      cleanMesh.position,
+      cleanMesh.quaternion,
+      cleanMesh.scale
+    );
+    cleanMesh.quaternion.normalize();
+    cleanMesh.updateMatrix();
+
+    if (srcMesh.morphTargetDictionary){
+      cleanMesh.morphTargetDictionary = {
+        ...srcMesh.morphTargetDictionary
+      };
+      cleanMesh.morphTargetInfluences = Array.from(
+        srcMesh.morphTargetInfluences || []
+      );
+    }
+
+    exportRoot.add(cleanMesh);
+    exportRoot.updateMatrixWorld(true);
+
+    const cleanSkeleton = new THREE.Skeleton(cleanBones);
+    cleanSkeleton.calculateInverses();
+    cleanMesh.bind(cleanSkeleton,cleanMesh.matrixWorld.clone());
+    cleanMesh.normalizeSkinWeights?.();
+
+    totalBones += cleanBones.length;
+    totalMeshes++;
+
+    // Bake the RESULTING deform-bone world transforms, not the CloudRig
+    // controls. This makes the exported animation independent of constraints,
+    // IK/FK controls and the RIG-Sintel scale-100 hierarchy.
+    const times = uniqueClipTimes(clip);
+    const pValues = new Map();
+    const qValues = new Map();
+    const sValues = new Map();
+    const previousQ = new Map();
+
+    for (const oldIndex of orderedOldIndices){
+      const name = oldSkeleton.bones[oldIndex].name;
+      pValues.set(name,[]);
+      qValues.set(name,[]);
+      sValues.set(name,[]);
+    }
+
+    resetRigToRest(targetRig);
+    activateClip(targetRig,clip);
+
+    for (const t of times){
+      setRigTime(targetRig,t);
+
+      for (const oldIndex of orderedOldIndices){
+        const oldBone = oldSkeleton.bones[oldIndex];
+        const weightedParent = nearestWeightedAncestor(oldBone,weightedNames);
+        const parentWorld = weightedParent ? weightedParent.matrixWorld : null;
+        const d = decomposeRelativeWorld(oldBone.matrixWorld,parentWorld);
+
+        const prev = previousQ.get(oldBone.name);
+        if (prev && prev.dot(d.q) < 0){
+          d.q.x *= -1;
+          d.q.y *= -1;
+          d.q.z *= -1;
+          d.q.w *= -1;
+        }
+        previousQ.set(oldBone.name,d.q.clone());
+
+        pValues.get(oldBone.name).push(d.p.x,d.p.y,d.p.z);
+        qValues.get(oldBone.name).push(d.q.x,d.q.y,d.q.z,d.q.w);
+        sValues.get(oldBone.name).push(d.s.x,d.s.y,d.s.z);
+      }
+    }
+
+    for (const oldIndex of orderedOldIndices){
+      const name = oldSkeleton.bones[oldIndex].name;
+      const prefix = meshIndex ? `Skin${meshIndex}_` : "";
+      const cleanName = prefix + name;
+
+      // Names are unique in this CloudRig. For multi-skin files, prefix the
+      // duplicate branch and keep the clip binding deterministic.
+      const cleanBone = cleanByName.get(name);
+      if (meshIndex){
+        cleanBone.name = cleanName;
+      }
+
+      allTracks.push(
+        new THREE.VectorKeyframeTrack(
+          `${cleanName}.position`,
+          times,
+          pValues.get(name)
+        )
+      );
+      allTracks.push(
+        new THREE.QuaternionKeyframeTrack(
+          `${cleanName}.quaternion`,
+          times,
+          qValues.get(name)
+        )
+      );
+
+      // Export scale only if it actually changes over time. Most CloudRig
+      // deform bones stay unit-scaled, avoiding unnecessary Blender channels.
+      const sv = sValues.get(name);
+      let animatedScale = false;
+      for (let i=3;i<sv.length;i+=3){
+        if (
+          Math.abs(sv[i]-sv[0]) > 1e-5
+          || Math.abs(sv[i+1]-sv[1]) > 1e-5
+          || Math.abs(sv[i+2]-sv[2]) > 1e-5
+        ){
+          animatedScale = true;
+          break;
+        }
+      }
+      if (animatedScale){
+        allTracks.push(
+          new THREE.VectorKeyframeTrack(
+            `${cleanName}.scale`,
+            times,
+            sv
+          )
+        );
+      }
+    }
+  }
+
+  if (!totalMeshes || !totalBones){
+    throw new Error("No pude construir un skeleton deform-only.");
+  }
+
+  const cleanClip = new THREE.AnimationClip(
+    "Retargeted_DeformOnly",
+    clip.duration,
+    allTracks
+  );
+  cleanClip.resetDuration();
+
+  resetRigToRest(targetRig);
+  targetRig.root.updateMatrixWorld(true);
+  exportRoot.updateMatrixWorld(true);
+
+  return {
+    root:exportRoot,
+    clip:cleanClip,
+    totalBones,
+    totalMeshes
   };
 }
 
@@ -2472,27 +2827,33 @@ async function exportGlb(){
   setStatus("Preparando GLB…");
 
   try{
-    // IMPORTANT: preserve the exact imported skeleton hierarchy and inverse
-    // bind relationship. CloudRig uses a non-unit armature ancestor
-    // (RIG-Sintel scale 100 / X rotation) that is compensated by FBX skin bind
-    // matrices. Reparenting/baking that transform without recomputing every
-    // inverse bind matrix explodes the mesh in Blender.
-    //
-    // Unit conversion to meters already happens once at FBX load on the ROOT,
-    // so no skeleton transform normalization is needed here.
     resetRigToRest(state.targetRig);
     state.targetRig.root.updateMatrixWorld(true);
 
-    const scaleInfo = exportScaleReport(state.targetRig.root);
+    let exportRoot = state.targetRig.root;
+    let exportClip = clip;
+    let deformOnlyInfo = null;
+
+    if (state.targetRig.cloudRigProfile){
+      setStatus("Construyendo skeleton deform-only para GLB…");
+      deformOnlyInfo = buildCleanDeformExport(
+        state.targetRig,
+        clip
+      );
+      exportRoot = deformOnlyInfo.root;
+      exportClip = deformOnlyInfo.clip;
+    }
+
+    const scaleInfo = exportScaleReport(exportRoot);
     const exporter = new GLTFExporter();
     const result = await parseGlbWithFallback(
       exporter,
-      state.targetRig.root,
-      clip
+      exportRoot,
+      exportClip
     );
 
     const name = safeBaseName(state.targetRig.fileName || "target")
-      + "_retargeted.glb";
+      + (deformOnlyInfo ? "_retargeted_deform.glb" : "_retargeted.glb");
     downloadBlob(
       new Blob([result.data],{type:"model/gltf-binary"}),
       name
@@ -2518,8 +2879,12 @@ async function exportGlb(){
         + "."
       : "";
 
+    const skeletonNote = deformOnlyInfo
+      ? ` Export limpio: ${deformOnlyInfo.totalMeshes} mesh(es), ${deformOnlyInfo.totalBones} deform bone(s); controles CloudRig excluidos y animación horneada desde matrices world.`
+      : " Export directo del skeleton Target.";
+
     setStatus(
-      `GLB exportado: ${name}. Root scale=[${rs.x.toFixed(4)}, ${rs.y.toFixed(4)}, ${rs.z.toFixed(4)}]. Bounds world=[${ws.x.toFixed(4)}, ${ws.y.toFixed(4)}, ${ws.z.toFixed(4)}] m. FBX→glTF en metros. Bind matrices y jerarquía del skin preservadas.${nodeScaleNote}${materialNote}`,
+      `GLB exportado: ${name}. Root scale=[${rs.x.toFixed(4)}, ${rs.y.toFixed(4)}, ${rs.z.toFixed(4)}]. Bounds world=[${ws.x.toFixed(4)}, ${ws.y.toFixed(4)}, ${ws.z.toFixed(4)}] m. FBX→glTF en metros.${skeletonNote}${nodeScaleNote}${materialNote}`,
       "success"
     );
   }catch(err){
