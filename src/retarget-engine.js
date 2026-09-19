@@ -240,7 +240,6 @@ export function createRigState(root, fileName=""){
   const rig = {
     root,
     rootRest:cloneTransform(root),
-    rootWorldRest:root.matrixWorld.clone(),
     fileName,
     bones,
     boneMap,
@@ -1526,7 +1525,7 @@ export async function bakeRetarget(options){
     fps=30,autoScale=true,useCurrentSourcePoseAsRest=false,
     restPosePreset=null,includeRestLocationScale=false,
     useWorldLocation=false,headSource="",headTarget="",
-    correctHands=true,correctFeet=true,useMixamoHelperRig=true,
+    correctHands=true,correctFeet=true,
     faceSettings={global:1,perRegion:false,regions:{}},
     onProgress
   } = options || {};
@@ -1750,37 +1749,14 @@ export async function bakeRetarget(options){
       const targetReach = targetUpperLen + targetForeLen;
       if (sourceReach < EPS || targetReach < EPS) continue;
 
-      const sHips = resolveBone(sourceRig,"Hips",sourcePrefix);
-      const sHipsRest = sHips ? sourceRest.get(sHips.name) : null;
-
       footCorrectionChains.push({
         kind:"LEG",
         side,
-        sUpper,sMid,sEnd,sHips,
+        sUpper,sMid,sEnd,
         tUpperName,tMidName,tEndName,
         sourceUpperLen,sourceForeLen,
         targetUpperLen,targetForeLen,
-        reachScale:targetReach/sourceReach,
-        helperRig:{
-          ctrlMaster:"Ctrl_Master",
-          ctrlHips:"Ctrl_Hips",
-          ctrlHipsFree:"Ctrl_Hips_Free",
-          ctrlThigh:`Ctrl_UpLeg_FK_${side}`,
-          ctrlKnee:`Ctrl_Leg_FK_${side}`,
-          ctrlFootFK:`Ctrl_Foot_FK_${side}`,
-          ctrlFootIK:`Ctrl_Foot_IK_${side}`,
-          ctrlPole:`Ctrl_LegPole_IK_${side}`,
-          footTarget:`Foot_IK_target_${side}`,
-          sourceFootRest:sEndRest?.worldPosition.clone() || null,
-          sourceFootRestMatrix:sEndRest?.world.clone() || null,
-          sourceKneeRest:sMidRest?.worldPosition.clone() || null,
-          sourceKneeRestMatrix:sMidRest?.world.clone() || null,
-          sourceHipsRest:sHipsRest?.worldPosition.clone() || null,
-          targetFootRest:tEndRest?.worldPosition.clone() || null,
-          targetFootRestMatrix:tEndRest?.world.clone() || null,
-          targetKneeRest:tMidRest?.worldPosition.clone() || null,
-          targetKneeRestMatrix:tMidRest?.world.clone() || null
-        }
+        reachScale:targetReach/sourceReach
       });
     }
   }
@@ -1789,54 +1765,6 @@ export async function bakeRetarget(options){
     ...armCorrectionChains.map(chain => ({...chain,kind:"ARM"})),
     ...footCorrectionChains
   ];
-
-  // The useful behavior of the Blender Mixamo helper rig is not "copy the
-  // full foot matrix into another proportioned character". That over-constrains
-  // the leg and was why the Target stood up while the Source was still seated.
-  // What matters is the Foot IK contact target: when a Source foot is planted,
-  // keep the Target end-effector fixed in WORLD while root/hips move.
-  //
-  // Pre-sample Source foot trajectories and detect planted intervals.
-  if (correctFeet && useMixamoHelperRig && targetRig.cloudRigProfile){
-    for (const chain of footCorrectionChains){
-      const positions=[];
-      for (let i=0;i<frameCount;i++){
-        setRigTime(sourceRig,times[i]);
-        sourceRig.root.updateMatrixWorld(true);
-        positions.push(
-          new THREE.Vector3().setFromMatrixPosition(chain.sEnd.matrixWorld)
-        );
-      }
-
-      const minY=Math.min(...positions.map(p=>p.y));
-      const reach=Math.max(EPS,chain.sourceUpperLen+chain.sourceForeLen);
-      const contacts=new Array(frameCount).fill(false);
-
-      for (let i=0;i<frameCount;i++){
-        const a=positions[Math.max(0,i-1)];
-        const b=positions[Math.min(frameCount-1,i+1)];
-        const dt=Math.max(step,(times[Math.min(frameCount-1,i+1)]-times[Math.max(0,i-1)]));
-        const speed=a.distanceTo(b)/dt;
-        const speedNorm=speed/reach;
-        const heightNorm=(positions[i].y-minY)/reach;
-
-        // Generous enough for mocap jitter, strict enough to release on steps.
-        contacts[i]=speedNorm < 0.30 && heightNorm < 0.12;
-      }
-
-      // Remove isolated one-frame contact losses caused by sampling jitter.
-      for (let i=1;i<frameCount-1;i++){
-        if (!contacts[i] && contacts[i-1] && contacts[i+1]) contacts[i]=true;
-      }
-
-      chain.sourceFootPositions=positions;
-      chain.contactByFrame=contacts;
-      chain.contactAnchorWorld=null;
-      chain.contactFrames=contacts.reduce((n,v)=>n+(v?1:0),0);
-    }
-
-    setRigTime(sourceRig,0);
-  }
 
   const sortedBones = [...targetRig.bones].sort((a,b) =>
     targetRig.rest.get(a.name).depth - targetRig.rest.get(b.name).depth
@@ -1954,10 +1882,6 @@ export async function bakeRetarget(options){
     }
     if (rootPValues) pushVec(rootPValues,rootLocalPos);
 
-    const targetRootRestPos = targetRig.rootRest?.position.clone()
-      || targetRig.root.position.clone();
-    const targetRootMotionDelta = rootLocalPos.clone().sub(targetRootRestPos);
-
     // Global root rotation. This was the missing half of Set-as-Root:
     // previous builds animated only root position, so the character moved
     // through space but did not turn with the Source.
@@ -2010,24 +1934,6 @@ export async function bakeRetarget(options){
     const rootDeltaInv = rootRotationRecords.length
       ? rootDeltaQ.clone().invert()
       : null;
-
-    const rootRestScale = targetRig.rootRest?.scale.clone()
-      || targetRig.root.scale.clone();
-    const rootRestQuat = targetRig.rootRest?.quaternion.clone()
-      || targetRig.root.quaternion.clone();
-    const targetRootRestMatrix = new THREE.Matrix4().compose(
-      targetRootRestPos.clone(),
-      rootRestQuat,
-      rootRestScale
-    );
-    const targetRootCurrentMatrix = new THREE.Matrix4().compose(
-      rootLocalPos.clone(),
-      rootLocalQuat.clone(),
-      rootRestScale
-    );
-    const targetRootDeltaMatrix = targetRootCurrentMatrix.clone()
-      .multiply(targetRootRestMatrix.clone().invert());
-    const targetRootDeltaInvMatrix = targetRootDeltaMatrix.clone().invert();
 
     // PASS 1: rest locals + regular BASIS/WORLD location + world-delta rotation.
     for (const bone of sortedBones){
@@ -2195,40 +2101,7 @@ export async function bakeRetarget(options){
       if (!A || !currentB || !currentC || !originalHandQ) continue;
       if (srcAC.lengthSq() < EPS || srcAB.lengthSq() < EPS) continue;
 
-      let helperPoleReference = null;
-
-      // Start from the direct two-bone retarget that already preserves the
-      // seated/standing pose correctly.
-      let desiredC = A.clone().add(
-        srcAC.clone().multiplyScalar(chain.reachScale)
-      );
-
-      if (
-        chain.kind === "LEG"
-        && useMixamoHelperRig
-        && targetRig.cloudRigProfile
-        && chain.contactByFrame
-      ){
-        const planted=Boolean(chain.contactByFrame[frame]);
-
-        if (planted){
-          // On contact start, capture the Target foot where the normal
-          // retarget put it. Store that point in animated WORLD space.
-          if (!chain.contactAnchorWorld){
-            chain.contactAnchorWorld=desiredC.clone()
-              .applyMatrix4(targetRootDeltaMatrix);
-          }
-
-          // Convert the fixed WORLD anchor back into the current root-local
-          // solve space. As Ctrl_Master/Ctrl_Hips move, the leg compensates
-          // so the shoe remains planted instead of being dragged along.
-          desiredC=chain.contactAnchorWorld.clone()
-            .applyMatrix4(targetRootDeltaInvMatrix);
-        } else {
-          chain.contactAnchorWorld=null;
-        }
-      }
-
+      let desiredC = A.clone().add(srcAC.multiplyScalar(chain.reachScale));
       let AC = desiredC.clone().sub(A);
       let d = AC.length();
       if (d < EPS) continue;
@@ -2278,7 +2151,7 @@ export async function bakeRetarget(options){
 
       const candidate1 = base.clone().add(perp.clone().multiplyScalar(h));
       const candidate2 = base.clone().add(perp.clone().multiplyScalar(-h));
-      const sourceMidReference = helperPoleReference || A.clone().add(
+      const sourceMidReference = A.clone().add(
         srcAB.clone().multiplyScalar(
           chain.targetUpperLen/Math.max(chain.sourceUpperLen,EPS)
         )
@@ -2481,21 +2354,6 @@ export async function bakeRetarget(options){
       reachScale:c.reachScale
     })),
     limbBendPlaneMode:"source-plane",
-    mixamoIntermediateRig:Boolean(useMixamoHelperRig && targetRig.cloudRigProfile),
-    mixamoIntermediateControls:footCorrectionChains.map(c => c.helperRig ? ({
-      side:c.side,
-      ctrlMaster:c.helperRig.ctrlMaster,
-      ctrlHips:c.helperRig.ctrlHips,
-      ctrlHipsFree:c.helperRig.ctrlHipsFree,
-      ctrlFootIK:c.helperRig.ctrlFootIK,
-      ctrlPole:c.helperRig.ctrlPole,
-      footTarget:c.helperRig.footTarget,
-      contactFrames:c.contactFrames || 0,
-      totalFrames:frameCount
-    }) : null).filter(Boolean),
-    footCorrectionMode:(useMixamoHelperRig && targetRig.cloudRigProfile)
-      ? "mixamo-helper-pose-space"
-      : "direct-two-bone",
     footEndEffectorCorrection:Boolean(correctFeet),
     footEndEffectorChains:footCorrectionChains.map(c => ({
       side:c.side,
