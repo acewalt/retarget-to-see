@@ -19,7 +19,7 @@ import {
   previewRestPosePreset,
   captureRestPosePreset,
   serializeMap
-} from "./retarget-engine.js?v=20260919-visual-mesh-scale1";
+} from "./retarget-engine.js?v=20260919-skinned-bounds1";
 
 const $ = id => document.getElementById(id);
 
@@ -565,7 +565,7 @@ async function loadFbx(file,kind){
     els.sourceDropHint.hidden = true;
     populateSourceClips();
     if (state.sourceClip) activateClip(rig,state.sourceClip);
-    els.sourceMeta.textContent = `${file.name} · ${rig.bones.length} huesos · ${rig.animations.length} clips`;
+    els.sourceMeta.textContent = `${file.name} · ${rig.bones.length} huesos · ${rig.animations.length} clips${rig.visualRest?.valid ? ` · bounds ${rig.visualRest.skinnedMeshCount || 0} skinned` : ""}`;
   } else {
     state.targetRig = rig;
     state.retargetClip = null;
@@ -584,7 +584,7 @@ async function loadFbx(file,kind){
       ? ` · ${rig.weightedBoneNames.size} deform reales`
       : "";
     const profileInfo = rig.cloudRigProfile ? " · CloudRig DEF profile" : "";
-    els.targetMeta.textContent = `${file.name} · ${rig.bones.length} huesos${weightedInfo}${profileInfo}${ignored}`;
+    els.targetMeta.textContent = `${file.name} · ${rig.bones.length} huesos${weightedInfo}${profileInfo}${ignored}${rig.visualRest?.valid ? ` · bounds ${rig.visualRest.skinnedMeshCount || 0} skinned` : ""}`;
     els.exportGlbBtn.disabled = true;
     els.exportClipBtn.disabled = true;
     els.convertIkBtn.disabled = true;
