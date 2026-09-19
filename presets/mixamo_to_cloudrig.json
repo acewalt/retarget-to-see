@@ -4,7 +4,7 @@
   "target_kind": "cloudrig",
   "namespace_strip": "",
   "auto_bake_ik": false,
-  "_note": "Mixamo → CloudRig FK web preset. The browser engine detects the exported CloudRig hierarchy and resolves FK controls to explicit DEF section roots: UpperArm→DEF-UpperArm_1, Forearm→DEF-Forearm_1, Hand→DEF-Hand, Thigh→DEF-Thigh_1, Knee→DEF-Knee_1, Foot→DEF-Foot, Toes→DEF-Toes, plus explicit DEF torso/head aliases. Secondary _2 deform/twist bones are never targeted directly; they inherit through the native DEF chain. Cross-branch joints (hips→thigh, chest→shoulder, neck→head) can still receive virtual positional stabilization because Blender constraints are absent in FBX.",
+  "_note": "CloudRig mapping aligned with BlendCap's original control-rig preset. Browser preview may redirect these controls to DEF bones because FBX does not preserve Blender constraints, but the FBX Action export keeps these exact FK/control targets so the Action can be reused on the original CloudRig in Blender.",
   "ik_chains": [
     {
       "limb_kind": "ARM",
@@ -277,31 +277,36 @@
       "influence": 1
     },
     {
-      "source": "Hips",
-      "target": "HIP-Spine",
-      "channels": "LOC_ROT",
-      "influence": 1,
-      "axes": "Z"
+      "source": "Spine1",
+      "target": "FK-Chest",
+      "channels": "ROT",
+      "influence": 1
     },
     {
       "source": "Spine",
-      "target": "TORSO-Spine",
-      "channels": "LOC_ROT",
-      "influence": 1,
-      "axes": "XYZ",
-      "set_as_root": true
-    },
-    {
-      "source": "Spine1",
       "target": "FK-Spine",
       "channels": "ROT",
       "influence": 1
     },
     {
-      "source": "Spine2",
-      "target": "FK-Chest",
+      "source": "Hips",
+      "target": "HIP-Spine",
       "channels": "ROT",
       "influence": 1
+    },
+    {
+      "source": "Hips",
+      "target": "TORSO-Spine",
+      "channels": "LOC",
+      "influence": 1,
+      "axes": "Z"
+    },
+    {
+      "source": "Hips",
+      "target": "root",
+      "channels": "LOC",
+      "influence": 1,
+      "axes": "XY"
     },
     {
       "source": "LeftUpLeg",
