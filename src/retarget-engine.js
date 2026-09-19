@@ -1750,9 +1750,6 @@ export async function bakeRetarget(options){
       if (sourceReach < EPS || targetReach < EPS) continue;
 
       const sHips = resolveBone(sourceRig,"Hips",sourcePrefix);
-      const sUpperRest = sourceRest.get(sUpper.name);
-      const sMidRest = sourceRest.get(sMid.name);
-      const sEndRest = sourceRest.get(sEnd.name);
       const sHipsRest = sHips ? sourceRest.get(sHips.name) : null;
 
       footCorrectionChains.push({
