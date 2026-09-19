@@ -1250,6 +1250,58 @@ function rootMotionSourceForBone(sourceRig,bone){
   return bone;
 }
 
+function horizontalYawDeltaFromBone(bone,restEntry){
+  if (!bone || !restEntry) return new THREE.Quaternion();
+
+  const worldUp = new THREE.Vector3(0,1,0);
+  const axes = [
+    new THREE.Vector3(0,0,1),
+    new THREE.Vector3(1,0,0),
+    new THREE.Vector3(0,1,0)
+  ];
+
+  // Pick the bone-local axis that is most horizontal in the rest pose.
+  // We only need a stable heading axis: the signed delta is identical
+  // whether that horizontal axis points forward or sideways.
+  let localHeading = axes[0];
+  let best = -1;
+  for (const axis of axes){
+    const worldAxis = axis.clone().applyQuaternion(restEntry.worldQuaternion);
+    const horizontal = worldAxis.clone().setY(0);
+    const score = horizontal.lengthSq();
+    if (score > best){
+      best = score;
+      localHeading = axis;
+    }
+  }
+
+  const restHeading = localHeading.clone()
+    .applyQuaternion(restEntry.worldQuaternion)
+    .setY(0);
+  const poseWorldQ = new THREE.Quaternion();
+  bone.matrixWorld.decompose(
+    new THREE.Vector3(),
+    poseWorldQ,
+    new THREE.Vector3()
+  );
+  const poseHeading = localHeading.clone()
+    .applyQuaternion(poseWorldQ)
+    .setY(0);
+
+  if (restHeading.lengthSq() < 1e-8 || poseHeading.lengthSq() < 1e-8){
+    return new THREE.Quaternion();
+  }
+
+  restHeading.normalize();
+  poseHeading.normalize();
+
+  const cross = restHeading.clone().cross(poseHeading);
+  const dot = THREE.MathUtils.clamp(restHeading.dot(poseHeading),-1,1);
+  const angle = Math.atan2(cross.dot(worldUp),dot);
+
+  return new THREE.Quaternion().setFromAxisAngle(worldUp,angle);
+}
+
 function actualPairRecords(pairs,sourceRig,targetRig,sourcePrefix,targetPrefix){
   const out = [];
 
@@ -1283,30 +1335,35 @@ function actualPairRecords(pairs,sourceRig,targetRig,sourcePrefix,targetPrefix){
         || resolveRetargetTargetBone(targetRig,raw.target,targetPrefix);
       if (!rootTargetExists) continue;
 
+      const rootSource = rootMotionSourceForBone(sourceRig,sourceBone);
+
       out.push({
         ...raw,
         pairIndex,
         channels:"ROT",
+        axes:"Y",
         _rotation_only:true,
         _root_rotation:true,
-        sourceBone,
+        _yaw_only:true,
+        sourceBone:rootSource,
         targetBone:null,
         targetRoot:true,
-        sourceRest:sourceRig.rest.get(sourceBone.name),
+        sourceRest:sourceRig.rest.get(rootSource.name),
         targetRest:null
       });
 
-      const locSource = rootMotionSourceForBone(sourceRig,sourceBone);
       out.push({
         ...raw,
         pairIndex,
         set_as_root:false,
         channels:"LOC",
+        axes:"XZ",
         _location_only:true,
-        sourceBone:locSource,
+        _root_horizontal:true,
+        sourceBone:rootSource,
         targetBone:null,
         targetRoot:true,
-        sourceRest:sourceRig.rest.get(locSource.name),
+        sourceRest:sourceRig.rest.get(rootSource.name),
         targetRest:null
       });
       continue;
@@ -1495,20 +1552,26 @@ export async function bakeRetarget(options){
       const srcRest = sourceRest.get(r.sourceBone.name);
       if (!srcRest) continue;
 
-      const srcPoseQ = new THREE.Quaternion();
-      r.sourceBone.matrixWorld.decompose(
-        new THREE.Vector3(),
-        srcPoseQ,
-        new THREE.Vector3()
-      );
-
       const motionScale = pairMotionScale(r,faceSettings)
         * Number(r.influence ?? 1);
-      const deltaQ = quatScaledDelta(
-        srcPoseQ,
-        srcRest.worldQuaternion,
-        motionScale
-      );
+
+      let deltaQ;
+      if (r._yaw_only){
+        const yaw = horizontalYawDeltaFromBone(r.sourceBone,srcRest);
+        deltaQ = new THREE.Quaternion().slerp(yaw,motionScale).normalize();
+      } else {
+        const srcPoseQ = new THREE.Quaternion();
+        r.sourceBone.matrixWorld.decompose(
+          new THREE.Vector3(),
+          srcPoseQ,
+          new THREE.Vector3()
+        );
+        deltaQ = quatScaledDelta(
+          srcPoseQ,
+          srcRest.worldQuaternion,
+          motionScale
+        );
+      }
 
       rootDeltaQ.multiply(deltaQ).normalize();
     }
@@ -1736,6 +1799,12 @@ export async function bakeRetarget(options){
     rootMotionSources:[...new Set(rootLocationRecords.map(r => r.sourceBone?.name).filter(Boolean))],
     rootRotationChannels:rootRotationRecords.length,
     rootRotationSources:[...new Set(rootRotationRecords.map(r => r.sourceBone?.name).filter(Boolean))],
+    rootRotationMode:rootRotationRecords.some(r => r._yaw_only)
+      ? "pelvis-yaw-only"
+      : "full-quaternion",
+    rootTranslationMode:rootLocationRecords.some(r => r._root_horizontal)
+      ? "horizontal-XZ-only"
+      : "mapped-axes",
     splitRootMappings:[...new Set(records
       .filter(r => r._rotation_only || r._location_only)
       .map(r => r.pairIndex))]
