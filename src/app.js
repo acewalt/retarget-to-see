@@ -19,7 +19,7 @@ import {
   previewRestPosePreset,
   captureRestPosePreset,
   serializeMap
-} from "./retarget-engine.js?v=20260919-foot-contact-matrix-fix1";
+} from "./retarget-engine.js?v=20260919-mixamo-helper-matrix1";
 
 const $ = id => document.getElementById(id);
 
