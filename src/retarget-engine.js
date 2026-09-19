@@ -567,15 +567,12 @@ export function resolveRetargetTargetBone(rig,shortName="",prefix=""){
   // Plain skeleton FBXs often skin directly to the mapped bone.
   if (!deformNames.size) return direct;
 
-  // A control can influence the visible mesh in two ways:
-  // 1) it has direct vertex weights, or
-  // 2) it is an ancestor of weighted deform bones.
-  // Keep those controls as the actual bake target so master controls such as
-  // CloudRig TORSO-Spine visibly rotate and their hierarchy participates.
-  if (direct && (
-    deformNames.has(direct.name)
-    || rig.hierarchyDriverBoneNames?.has(direct.name)
-  )) return direct;
+  // For browser/FBX FK retargeting, only accept a direct mapped bone when
+  // it has REAL vertex influence. Blender control bones may be ancestors of
+  // deform bones, but their intended behavior depends on constraints/drivers
+  // that are not exported to FBX. Baking those controls directly caused
+  // unstable limb/pelvis behavior and mesh tearing.
+  if (direct && deformNames.has(direct.name)) return direct;
 
   // Control-rig FBXs (Rigify/CloudRig/ARP) usually export both control
   // bones and DEF bones, but Blender constraints are gone. Prefer the
@@ -1324,6 +1321,52 @@ function actualPairRecords(pairs,sourceRig,targetRig,sourcePrefix,targetPrefix){
       continue;
     }
 
+    const sourceKey = normalizeBoneName(raw.source);
+    const isPelvisSource = sourceKey === "hips" || sourceKey === "pelvis";
+    const hasPelvisLocation = isPelvisSource && pairHasLocation(raw) && !raw.set_as_root;
+
+    if (hasPelvisLocation){
+      const targetBone = resolveRetargetTargetBone(
+        targetRig,
+        raw.target,
+        targetPrefix
+      );
+      if (!targetBone) continue;
+
+      // Rotation stays on the actual pelvis deform bone.
+      if (pairHasRotation(raw)){
+        out.push({
+          ...raw,
+          pairIndex,
+          channels:"ROT",
+          _rotation_only:true,
+          sourceBone,
+          targetBone,
+          targetRoot:false,
+          sourceRest:sourceRig.rest.get(sourceBone.name),
+          targetRest:targetRig.rest.get(targetBone.name)
+        });
+      }
+
+      // Translation moves the whole Target object. This is critical for
+      // exported control rigs: translating DEF-Hips alone pulls only part of
+      // the weighted hierarchy while clothing/accessory branches remain at
+      // bind, producing the long spikes visible in the viewport.
+      out.push({
+        ...raw,
+        pairIndex,
+        channels:"LOC",
+        _location_only:true,
+        _pelvis_translation_to_root:true,
+        sourceBone,
+        targetBone:null,
+        targetRoot:true,
+        sourceRest:sourceRig.rest.get(sourceBone.name),
+        targetRest:null
+      });
+      continue;
+    }
+
     if (raw.set_as_root){
       // Auto-Rig Pro "Set as Root" is the global motion reference. In Blender
       // it targets TORSO-Spine through rig constraints; in plain FBX those
@@ -1802,9 +1845,14 @@ export async function bakeRetarget(options){
     rootRotationMode:rootRotationRecords.some(r => r._yaw_only)
       ? "pelvis-yaw-only"
       : "full-quaternion",
-    rootTranslationMode:rootLocationRecords.some(r => r._root_horizontal)
-      ? "horizontal-XZ-only"
-      : "mapped-axes",
+    rootTranslationMode:rootLocationRecords.some(r => r._pelvis_translation_to_root)
+      ? "pelvis-translation-on-target-object"
+      : rootLocationRecords.some(r => r._root_horizontal)
+        ? "horizontal-XZ-only"
+        : "mapped-axes",
+    pelvisTranslationRedirectedToRoot:rootLocationRecords.some(
+      r => r._pelvis_translation_to_root
+    ),
     splitRootMappings:[...new Set(records
       .filter(r => r._rotation_only || r._location_only)
       .map(r => r.pairIndex))]
