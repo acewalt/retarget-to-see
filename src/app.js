@@ -20,7 +20,7 @@ import {
   captureRestPosePreset,
   captureCurrentRigReference,
   serializeMap
-} from "./retarget-engine.js?v=20260919-original-target-fbx2";
+} from "./retarget-engine.js?v=20260919-cloudrig-original-controls1";
 
 const $ = id => document.getElementById(id);
 
@@ -2943,6 +2943,102 @@ async function loadOriginalRigFbxExporter(){
   return mod.FBXExporter;
 }
 
+function cloudRigOriginalPairsForExport(){
+  if (!state.targetRig?.cloudRigProfile){
+    return state.pairs.map(p => ({...p}));
+  }
+
+  // The previous web preset intentionally rewired the torso for DEF-only
+  // preview. That is wrong for an Action that will be applied to the actual
+  // CloudRig in Blender. Restore BlendCap's real Mixamo→CloudRig control map:
+  // Hips rotates HIP-Spine, vertical motion goes to TORSO-Spine, horizontal
+  // locomotion goes to root, then Spine/FK-Spine and Spine1/FK-Chest.
+  const torsoSources = new Set(["hips","spine","spine1","spine2"]);
+  const torsoTargets = new Set([
+    "hipspine","torsospine","root","fkspine","fkchest"
+  ]);
+
+  const kept = state.pairs
+    .filter(p => {
+      const s = String(p.source || "").toLowerCase().replace(/[^a-z0-9]/g,"");
+      const t = String(p.target || "").toLowerCase().replace(/[^a-z0-9]/g,"");
+      return !(torsoSources.has(s) && torsoTargets.has(t));
+    })
+    .map(p => ({...p}));
+
+  kept.push(
+    {source:"Spine1",target:"FK-Chest",channels:"ROT",influence:1},
+    {source:"Spine",target:"FK-Spine",channels:"ROT",influence:1},
+    {source:"Hips",target:"HIP-Spine",channels:"ROT",influence:1},
+    {source:"Hips",target:"TORSO-Spine",channels:"LOC",axes:"Z",influence:1},
+    {source:"Hips",target:"root",channels:"LOC",axes:"XY",influence:1}
+  );
+
+  return kept;
+}
+
+function validateOriginalCloudRigControls(rig){
+  if (!rig?.cloudRigProfile) return;
+
+  const required = [
+    "root","TORSO-Spine","HIP-Spine",
+    "FK-Spine","FK-Chest","FK-Neck","FK-Head",
+    "FK-Shoulder.L","FK-UpperArm.L","FK-Forearm.L","FK-Hand.L",
+    "FK-Shoulder.R","FK-UpperArm.R","FK-Forearm.R","FK-Hand.R",
+    "FK-Thigh.L","FK-Knee.L","FK-Foot.L","FK-Toes.L",
+    "FK-Thigh.R","FK-Knee.R","FK-Foot.R","FK-Toes.R"
+  ];
+  const missing = required.filter(name => !rig.boneMap.has(name));
+  if (missing.length){
+    throw new Error(
+      "El Target no coincide con la jerarquía CloudRig esperada. Faltan: "
+      + missing.join(", ")
+    );
+  }
+}
+
+async function bakeOriginalRigControlClip(){
+  const {sourcePrefix,targetPrefix} = currentPrefixes();
+  const restTime = els.useTargetReference.checked
+    && Number.isFinite(state.targetReferenceSourceTime)
+    ? state.targetReferenceSourceTime
+    : state.currentTime;
+
+  const useSavedRest = els.useCustomRest.checked
+    && state.restPosePreset
+    && builtInRestPoseCompatible();
+
+  const pairs = cloudRigOriginalPairsForExport();
+
+  const result = await bakeRetarget({
+    sourceRig:state.sourceRig,
+    targetRig:state.targetRig,
+    sourceClip:state.sourceClip,
+    pairs,
+    sourcePrefix,targetPrefix,
+    fps:Number(els.fpsInput.value) || 30,
+    autoScale:els.autoScale.checked,
+    useCurrentSourcePoseAsRest:els.useCurrentRest.checked,
+    restPosePreset:useSavedRest ? state.restPosePreset : null,
+    includeRestLocationScale:els.includeRestLocScale.checked,
+    sourceRestTime:restTime,
+    targetRestOverride:els.useTargetReference.checked ? state.targetRestOverride : null,
+    useWorldLocation:els.useWorldLocation.checked,
+    // The Blender CloudRig will evaluate its own FK constraints. The browser
+    // preview-only 2-bone fixes must not be baked into the reusable FK Action.
+    correctHands:false,
+    correctFeet:false,
+    headSource:els.headSource.value,
+    headTarget:els.headTarget.value,
+    faceSettings:faceSettings(),
+    targetMode:"ORIGINAL_RIG",
+    onProgress:setProgress
+  });
+
+  result.clip.name = "Retargeted_OriginalRig_FK";
+  return {clip:result.clip,pairs,result};
+}
+
 function countExportableOriginalRigNodes(root){
   let bones = 0;
   let groups = 0;
@@ -2961,29 +3057,52 @@ function countExportableOriginalRigNodes(root){
 }
 
 async function exportOriginalTargetRigFbx(){
-  if (!state.targetRig || !state.retargetClip || state.busy) return;
+  if (!state.targetRig || !state.retargetClip || !state.sourceClip || state.busy) return;
 
   const rig = state.targetRig;
-  const clip = state.retargetClip;
+  const previewClip = state.retargetClip;
   const savedTime = state.currentTime;
 
   state.playing = false;
   els.playBtn.textContent = "▶";
   setBusy(true);
-  setStatus("Preparando FBX con el esqueleto ORIGINAL del Target…");
+  hideProgress();
+  setStatus("Horneando FK sobre los controles ORIGINALES del Target…");
 
   try{
-    // This is the important difference from the experimental GLB path:
-    // do NOT build a clean/deform skeleton and do NOT change parenting.
-    // Export the exact Bone/Object3D hierarchy that came from Target FBX.
+    validateOriginalCloudRigControls(rig);
+
+    // IMPORTANT: this is a SECOND bake. The viewport clip targets DEF bones
+    // because an FBX has no CloudRig constraints. The portable Blender Action
+    // instead targets FK/control bones from the original hierarchy supplied by
+    // the user: FK-UpperArm.*, FK-Thigh.*, HIP-Spine, TORSO-Spine, root, etc.
+    const direct = await bakeOriginalRigControlClip();
+    const clip = direct.clip;
+
     resetRigToRest(rig);
     rig.root.updateMatrixWorld(true);
 
     const hierarchy = countExportableOriginalRigNodes(rig.root);
     if (hierarchy.bones !== rig.bones.length){
       throw new Error(
-        "El conteo del esqueleto cambió antes de exportar: "
+        "La jerarquía Target cambió antes de exportar: "
         + hierarchy.bones + " vs " + rig.bones.length + " huesos."
+      );
+    }
+
+    const animatedNames = new Set(
+      clip.tracks
+        .map(t => String(t.name || "").replace(/\.(position|quaternion|scale)$/,""))
+        .filter(Boolean)
+    );
+
+    const unresolved = [...animatedNames].filter(name =>
+      name !== rig.root.name && !rig.boneMap.has(name)
+    );
+    if (unresolved.length){
+      throw new Error(
+        "La Action directa contiene canales que no existen en el Target original: "
+        + unresolved.slice(0,12).join(", ")
       );
     }
 
@@ -2991,10 +3110,6 @@ async function exportOriginalTargetRigFbx(){
     const exporter = new FBXExporter();
     const fps = Math.max(1,Number(els.fpsInput.value) || 30);
 
-    // Skeleton/action-only FBX. Meshes are deliberately excluded: they are
-    // unnecessary for transferring the Action and were the source of the
-    // previous GLB skin/bind problems. Every original Bone and intermediate
-    // Group/Null stays in the exact Target hierarchy and parent space.
     const bytes = exporter.parseSync(rig.root,{
       preset:"blender",
       unitScale:100,
@@ -3005,9 +3120,12 @@ async function exportOriginalTargetRigFbx(){
       includeAnimations:true,
       embedTextures:false,
       onlyVisible:false,
+      // Action-transfer FBX: same Target hierarchy, no mesh/skin. This avoids
+      // every GLB bind/skin reconstruction problem while preserving all bone
+      // names, parents and local spaces needed by Blender's Action importer.
       objectFilter:(obj) => !obj.isMesh && !obj.isLight && !obj.isCamera,
       customProperties:false,
-      creator:"Retarget to See - original Target rig action"
+      creator:"Retarget to See - exact Target hierarchy / original FK controls"
     });
 
     if (!(bytes instanceof Uint8Array) || bytes.byteLength < 1024){
@@ -3022,13 +3140,16 @@ async function exportOriginalTargetRigFbx(){
       name
     );
 
+    const controlNames = [...animatedNames]
+      .filter(n => /^(FK-|HIP-Spine$|TORSO-Spine$|root$)/.test(n))
+      .slice(0,32);
+
     setStatus(
-      "FBX RIG original exportado: " + name
-      + ". Se reutilizó la jerarquía Target tal cual: "
-      + hierarchy.bones + " huesos + " + hierarchy.groups
-      + " nodos/parents; " + hierarchy.skippedMeshes
-      + " malla(s) omitidas. La Action \"" + clip.name
-      + "\" va dentro del FBX. No se creó ningún DeformExport ni se cambiaron parent spaces.",
+      "FBX compatible con RIG original exportado: " + name
+      + ". Jerarquía reutilizada: " + hierarchy.bones + " huesos; "
+      + clip.tracks.length + " canales. Action: " + clip.name
+      + ". Controles horneados: " + controlNames.join(", ")
+      + ". No se usó DeformExport ni se reconstruyó el skeleton.",
       "success"
     );
   }catch(err){
@@ -3039,13 +3160,14 @@ async function exportOriginalTargetRigFbx(){
     );
   }finally{
     resetRigToRest(rig);
-    activateClip(rig,clip);
+    activateClip(rig,previewClip);
     setRigTime(
       rig,
-      Math.max(0,Math.min(savedTime,clip.duration || 0))
+      Math.max(0,Math.min(savedTime,previewClip.duration || 0))
     );
     rig.root.updateMatrixWorld(true);
     setBusy(false);
+    hideProgress();
   }
 }
 
