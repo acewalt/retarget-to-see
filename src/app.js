@@ -20,8 +20,8 @@ import {
   captureRestPosePreset,
   captureCurrentRigReference,
   serializeMap
-} from "./retarget-engine.js?v=20260919-exact-fbx1";
-import { injectAnimationIntoOriginalFbx } from "./fbx-animation-injector.js?v=20260919-exact-fbx2";
+} from "./retarget-engine.js?v=20260919-integrity1";
+import { injectAnimationIntoOriginalFbx } from "./fbx-animation-injector.js?v=20260919-integrity1";
 
 const $ = id => document.getElementById(id);
 
@@ -3302,11 +3302,18 @@ async function exportOriginalTargetRigFbx(){
     );
 
     const d = injected.diagnostics;
+    const i = d.integrity || {};
     setStatus(
-      "FBX exacto exportado: " + name
-      + ". El esqueleto NO fue reconstruido: se reutilizó el FBX Target original ("
-      + d.originalModelCount + " Models) y sólo se inyectaron "
-      + d.donorAnimationObjects + " objetos de animación / "
+      "FBX exacto exportado y verificado: " + name
+      + ". Payload original intacto: "
+      + (i.limbNodes ?? "?") + " huesos LimbNode, "
+      + (i.meshes ?? "?") + " Model Mesh, "
+      + (i.geometries ?? "?") + " Geometry, "
+      + (i.skins ?? "?") + " Skin, "
+      + (i.clusters ?? "?") + " Clusters, "
+      + (i.weightedClusters ?? "?") + " grupos con pesos reales. "
+      + "No se reconstruyó armature/mesh/weights; sólo se añadieron "
+      + d.donorAnimationObjects + " objetos de animación y "
       + d.donorConnections + " conexiones. Controles animados: "
       + d.mappedTargets.slice(0,24).join(", ")
       + (d.mappedTargets.length > 24 ? "…" : "")
