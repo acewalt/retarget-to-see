@@ -1427,12 +1427,25 @@ function actualPairRecords(pairs,sourceRig,targetRig,sourcePrefix,targetPrefix){
       // exported control rigs: translating DEF-Hips alone pulls only part of
       // the weighted hierarchy while clothing/accessory branches remain at
       // bind, producing the long spikes visible in the viewport.
+      // Preset axes come from Blender conventions (Z-up), while the
+      // FBXLoader scene used by Three.js is Y-up. The Mixamo→CloudRig preset
+      // intentionally uses Hips LOC on Blender Z to carry vertical pelvis
+      // motion. If copied literally here, sitting/crouching motion is applied
+      // in depth instead of height and every downstream foot solve starts
+      // from the wrong pelvis position.
+      const rawAxes = String(raw.axes || "XYZ").toUpperCase();
+      const pelvisRootAxes = targetRig.cloudRigProfile && rawAxes === "Z"
+        ? "Y"
+        : raw.axes;
+
       out.push({
         ...raw,
         pairIndex,
         channels:"LOC",
+        axes:pelvisRootAxes,
         _location_only:true,
         _pelvis_translation_to_root:true,
+        _blender_z_to_three_y:targetRig.cloudRigProfile && rawAxes === "Z",
         sourceBone,
         targetBone:null,
         targetRoot:true,
@@ -2492,6 +2505,9 @@ export async function bakeRetarget(options){
         : "mapped-axes",
     pelvisTranslationRedirectedToRoot:rootLocationRecords.some(
       r => r._pelvis_translation_to_root
+    ),
+    pelvisAxisConvertedBlenderZToThreeY:rootLocationRecords.some(
+      r => r._blender_z_to_three_y
     ),
     virtualChainStabilizedTargets:virtualTargets,
     virtualChainStabilizedCount:virtualTargets.length,
