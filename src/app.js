@@ -19,7 +19,7 @@ import {
   previewRestPosePreset,
   captureRestPosePreset,
   serializeMap
-} from "./retarget-engine.js?v=20260919-mixamo-helper-footik1";
+} from "./retarget-engine.js?v=20260919-mixamo-helper-footik2";
 
 const $ = id => document.getElementById(id);
 
