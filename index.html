@@ -186,6 +186,51 @@
           </label>
         </div>
 
+        <div class="rest-pose-block">
+          <label class="check-row">
+            <input id="useTargetReference" type="checkbox" />
+            <span>Use Target Reference Pose</span>
+          </label>
+
+          <div class="subsection">
+            <h3>Editar pose de referencia Target</h3>
+
+            <label class="field">
+              <span>Hueso Target</span>
+              <input id="targetRestBone" type="text" list="targetBoneList" placeholder="FK-Thigh.L / DEF-Thigh_1L" />
+            </label>
+
+            <div class="two-cols">
+              <label class="field compact">
+                <span>Rot X°</span>
+                <input id="targetRestRotX" type="number" step="1" value="0" />
+              </label>
+              <label class="field compact">
+                <span>Rot Y°</span>
+                <input id="targetRestRotY" type="number" step="1" value="0" />
+              </label>
+            </div>
+            <label class="field compact">
+              <span>Rot Z°</span>
+              <input id="targetRestRotZ" type="number" step="1" value="0" />
+            </label>
+
+            <div class="button-row">
+              <button id="applyTargetRestBoneBtn" class="ghost small" type="button" disabled>Aplicar offset</button>
+              <button id="resetTargetRestBoneBtn" class="ghost small" type="button" disabled>Restaurar hueso</button>
+            </div>
+
+            <div class="button-row">
+              <button id="captureCommonReferenceBtn" class="secondary small" type="button" disabled>Capturar referencia común</button>
+              <button id="resetTargetReferenceBtn" class="ghost small" type="button" disabled>Restaurar Target</button>
+            </div>
+
+            <p id="targetReferenceInfo" class="hint">
+              Ajusta el Target para que coincida con la pose actual del Source y captura ambos como referencia de retarget.
+            </p>
+          </div>
+        </div>
+
         <label class="check-row">
           <input id="autoBakeIk" type="checkbox" />
           <span>Auto-bake IK on Apply</span>
@@ -269,6 +314,6 @@
     Port web del retargeting inspirado en <a href="https://github.com/Arcomade/BlendCap" target="_blank" rel="noreferrer">BlendCap</a> · GPL-3.0 · sin garantía.
   </footer>
 
-  <script type="module" src="./src/app.js?v=20260919-skinned-bounds1"></script>
+  <script type="module" src="./src/app.js?v=20260919-target-reference1"></script>
 </body>
 </html>
