@@ -7,7 +7,7 @@
  * execute Blender/bpy.
  */
 import * as THREE from "three";
-// REPUBLISH: torso-space arm solver build; behavior intentionally unchanged.
+// ARM SOLVER: restored user-confirmed post-CloudRig-hierarchy behavior.
 
 const EPS = 1e-8;
 const FACE_REGIONS = ["jaw","gaze","lids","brows","lips","cheeks","nose","tongue"];
@@ -2134,29 +2134,10 @@ export async function bakeRetarget(options){
     }
 
     // PASS 1C: two-bone end-effector correction for arms and legs.
-    // Arms are transferred in an anatomical torso frame derived from joint
-    // positions.  This keeps left/right motion mirrored correctly even when
-    // Mixamo and CloudRig use different bone roll/local axes.
-    const sourceTorsoFrame = (
-      srcFrameBones.left && srcFrameBones.right
-      && srcFrameBones.hips && srcFrameBones.chest
-    ) ? anatomicalFrame(
-      new THREE.Vector3().setFromMatrixPosition(srcFrameBones.left.matrixWorld),
-      new THREE.Vector3().setFromMatrixPosition(srcFrameBones.right.matrixWorld),
-      new THREE.Vector3().setFromMatrixPosition(srcFrameBones.hips.matrixWorld),
-      new THREE.Vector3().setFromMatrixPosition(srcFrameBones.chest.matrixWorld)
-    ) : null;
-
-    const targetTorsoFrame = (
-      tgtFrameNames.left && tgtFrameNames.right
-      && tgtFrameNames.hips && tgtFrameNames.chest
-    ) ? anatomicalFrame(
-      worldPositionOf(tgtFrameNames.left),
-      worldPositionOf(tgtFrameNames.right),
-      worldPositionOf(tgtFrameNames.hips),
-      worldPositionOf(tgtFrameNames.chest)
-    ) : null;
-
+    // This intentionally uses the same static-root-space transfer that was
+    // working correctly immediately after the explicit CloudRig DEF hierarchy
+    // was added. Do not remap arm vectors through a torso frame here: that
+    // changed one mirrored arm's bend/orientation.
     for (const chain of limbCorrectionChains){
       const srcA = new THREE.Vector3().setFromMatrixPosition(chain.sUpper.matrixWorld);
       const srcB = new THREE.Vector3().setFromMatrixPosition(chain.sMid.matrixWorld);
@@ -2164,13 +2145,7 @@ export async function bakeRetarget(options){
 
       let srcAC = srcC.clone().sub(srcA);
       let srcAB = srcB.clone().sub(srcA);
-
-      if (chain.kind === "ARM" && sourceTorsoFrame && targetTorsoFrame){
-        srcAC = mapVectorFrame(srcAC,sourceTorsoFrame,targetTorsoFrame);
-        srcAB = mapVectorFrame(srcAB,sourceTorsoFrame,targetTorsoFrame);
-      } else if (rootDeltaInv){
-        // Keep the existing leg behavior unchanged while the foot problem is
-        // investigated separately.
+      if (rootDeltaInv){
         srcAC.applyQuaternion(rootDeltaInv);
         srcAB.applyQuaternion(rootDeltaInv);
       }
@@ -2209,13 +2184,9 @@ export async function bakeRetarget(options){
       const h = Math.sqrt(hSq);
       const base = A.clone().add(dir.clone().multiplyScalar(a));
 
-      // Source elbow plane, expressed in the static-root frame.
-      let srcBC = srcC.clone().sub(srcB);
-      if (chain.kind === "ARM" && sourceTorsoFrame && targetTorsoFrame){
-        srcBC = mapVectorFrame(srcBC,sourceTorsoFrame,targetTorsoFrame);
-      } else if (rootDeltaInv){
-        srcBC.applyQuaternion(rootDeltaInv);
-      }
+      // Source elbow/knee plane, expressed in the static-root frame.
+      const srcBC = srcC.clone().sub(srcB);
+      if (rootDeltaInv) srcBC.applyQuaternion(rootDeltaInv);
       let planeN = srcAB.clone().cross(srcBC);
       if (planeN.lengthSq() < EPS){
         planeN = currentB.clone().sub(A).cross(currentC.clone().sub(currentB));
@@ -2237,29 +2208,19 @@ export async function bakeRetarget(options){
       const candidate1 = base.clone().add(perp.clone().multiplyScalar(h));
       const candidate2 = base.clone().add(perp.clone().multiplyScalar(-h));
 
-      // Preserve the bend side that the Target already had after the normal
-      // FK pass. This is safer than comparing against a Source-space elbow
-      // reference because left/right bone rolls differ between Mixamo and
-      // CloudRig. After frame 0, keep continuity with the previous solved
-      // elbow/knee so the limb cannot suddenly mirror to the other solution.
-      const bendKey = `${chain.kind || "LIMB"}:${chain.side}`;
-      let bendReference;
-
-      if (chain.kind === "ARM" && sourceTorsoFrame && targetTorsoFrame){
-        bendReference = A.clone().add(
-          srcAB.clone().multiplyScalar(
-            chain.targetUpperLen / Math.max(chain.sourceUpperLen,EPS)
-          )
-        );
-      } else {
-        bendReference = previousLimbBend.get(bendKey) || currentB;
-      }
-
-      const desiredB = candidate1.distanceToSquared(bendReference)
-        <= candidate2.distanceToSquared(bendReference)
+      // Use the Source elbow/knee direction itself to choose the correct
+      // two-bone branch. This is the exact selection that produced the
+      // user-confirmed good arm result before the later mirrored/torso-space
+      // experiments were introduced.
+      const sourceMidReference = A.clone().add(
+        srcAB.clone().multiplyScalar(
+          chain.targetUpperLen/Math.max(chain.sourceUpperLen,EPS)
+        )
+      );
+      const desiredB = candidate1.distanceToSquared(sourceMidReference)
+        <= candidate2.distanceToSquared(sourceMidReference)
         ? candidate1
         : candidate2;
-      previousLimbBend.set(bendKey,desiredB.clone());
 
       // Swing the target upper arm so the elbow reaches desiredB while
       // retaining the existing FK twist as much as possible.
