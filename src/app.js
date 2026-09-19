@@ -19,7 +19,7 @@ import {
   previewRestPosePreset,
   captureRestPosePreset,
   serializeMap
-} from "./retarget-engine.js?v=20260919-cd52-armgood";
+} from "./retarget-engine.js?v=20260919-bendside1";
 
 const $ = id => document.getElementById(id);
 
