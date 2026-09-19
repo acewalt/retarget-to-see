@@ -1456,21 +1456,51 @@ function actualPairRecords(pairs,sourceRig,targetRig,sourcePrefix,targetPrefix){
     }
 
     if (raw.set_as_root){
-      // Auto-Rig Pro "Set as Root" is the global motion reference. In Blender
-      // it targets TORSO-Spine through rig constraints; in plain FBX those
-      // constraints are gone. The faithful browser analogue is:
-      //   ROT -> whole Target object
-      //   LOC -> whole Target object
-      // Pelvis articulation remains on Hips -> HIP-Spine -> DEF-Hips.
-      const rootTargetExists = resolveBone(targetRig,raw.target,targetPrefix)
-        || resolveRetargetTargetBone(targetRig,raw.target,targetPrefix);
-      if (!rootTargetExists) continue;
+      // "Set as Root" has TWO responsibilities in the original Blender rig:
+      //
+      // 1) global locomotion / facing goes to the whole armature;
+      // 2) the control's own torso rotation still participates in the deform
+      //    hierarchy through Blender constraints.
+      //
+      // Earlier web builds kept only (1). For Mixamo→CloudRig this silently
+      // discarded Source Spine pitch/roll, so the Target inherited Hips lean
+      // without the Spine counter-rotation and became visibly over-hunched
+      // during sitting/crouching.
+      const directRootControl = resolveBone(targetRig,raw.target,targetPrefix);
+      const deformRotationTarget = resolveRetargetTargetBone(
+        targetRig,
+        raw.target,
+        targetPrefix
+      );
+      if (!directRootControl && !deformRotationTarget) continue;
+
+      // Preserve the Set-as-Root control's FULL rotation on the deform proxy.
+      // For CloudRig TORSO-Spine resolves to DEF-Hips, where it collapses with
+      // Hips→HIP-Spine. The bake stage handles that collapsed pair specially.
+      if (deformRotationTarget && pairHasRotation(raw)){
+        out.push({
+          ...raw,
+          pairIndex,
+          set_as_root:false,
+          channels:"ROT",
+          _rotation_only:true,
+          _set_as_root_deform_rotation:true,
+          sourceBone,
+          targetBone:deformRotationTarget,
+          targetRoot:false,
+          sourceRest:sourceRig.rest.get(sourceBone.name),
+          targetRest:targetRig.rest.get(deformRotationTarget.name)
+        });
+      }
 
       const rootSource = rootMotionSourceForBone(sourceRig,sourceBone);
 
+      // Whole-object yaw keeps disconnected accessory/control branches facing
+      // with the character. Bone-level world deltas remove this yaw later.
       out.push({
         ...raw,
         pairIndex,
+        set_as_root:false,
         channels:"ROT",
         axes:"Y",
         _rotation_only:true,
@@ -1483,6 +1513,8 @@ function actualPairRecords(pairs,sourceRig,targetRig,sourcePrefix,targetPrefix){
         targetRest:null
       });
 
+      // Horizontal locomotion comes from the nearest pelvis/root ancestor.
+      // Vertical Hips motion is supplied separately by Hips→HIP-Spine.
       out.push({
         ...raw,
         pairIndex,
@@ -2077,27 +2109,61 @@ export async function bakeRetarget(options){
           .normalize();
       } else if (rotRecs.length){
         // FBX control rigs can collapse several Blender controls onto one
-        // weighted deform proxy. Example from this CloudRig:
+        // weighted deform proxy. CloudRig is the important case:
         //   Hips  -> HIP-Spine   -> DEF-Hips
         //   Spine -> TORSO-Spine -> DEF-Hips (Set as Root)
-        // Previously only the FIRST row was used, so Spine/TORSO rotation
-        // was silently discarded. Compose the source LOCAL deltas instead.
-        let combinedDelta = new THREE.Quaternion(); // identity
-        for (const rotRec of rotRecs){
-          const srcRest = sourceRest.get(rotRec.sourceBone.name);
-          if (!srcRest) continue;
-          const motionScale = pairMotionScale(rotRec,faceSettings)
-            * Number(rotRec.influence ?? 1);
-          const deltaLocal = quatScaledDelta(
-            rotRec.sourceBone.quaternion,
-            srcRest.quaternion,
+        //
+        // Source Spine WORLD rotation already contains the inherited Hips
+        // rotation plus its own counter-rotation. Using the deepest mapped
+        // Source world delta is therefore more faithful than multiplying the
+        // two local deltas and also lets us remove the global root yaw exactly
+        // once.
+        const setRootRot = rotRecs
+          .filter(r => r._set_as_root_deform_rotation)
+          .sort((a,b) =>
+            (sourceRest.get(b.sourceBone.name)?.depth ?? 0)
+            - (sourceRest.get(a.sourceBone.name)?.depth ?? 0)
+          )[0];
+
+        if (setRootRot){
+          const srcRest = sourceRest.get(setRootRot.sourceBone.name);
+          const srcPoseQ = new THREE.Quaternion();
+          setRootRot.sourceBone.matrixWorld.decompose(
+            new THREE.Vector3(),
+            srcPoseQ,
+            new THREE.Vector3()
+          );
+          const motionScale = pairMotionScale(setRootRot,faceSettings)
+            * Number(setRootRot.influence ?? 1);
+          let deltaQ = quatScaledDelta(
+            srcPoseQ,
+            srcRest.worldQuaternion,
             motionScale
           );
-          combinedDelta.multiply(deltaLocal).normalize();
+          if (rootDeltaInv){
+            deltaQ = rootDeltaInv.clone().multiply(deltaQ).normalize();
+          }
+          desiredWorldQ = deltaQ
+            .multiply(rest.worldQuaternion.clone())
+            .normalize();
+        } else {
+          let combinedDelta = new THREE.Quaternion(); // identity
+          for (const rotRec of rotRecs){
+            const srcRest = sourceRest.get(rotRec.sourceBone.name);
+            if (!srcRest) continue;
+            const motionScale = pairMotionScale(rotRec,faceSettings)
+              * Number(rotRec.influence ?? 1);
+            const deltaLocal = quatScaledDelta(
+              rotRec.sourceBone.quaternion,
+              srcRest.quaternion,
+              motionScale
+            );
+            combinedDelta.multiply(deltaLocal).normalize();
+          }
+          composedLocalQ = combinedDelta
+            .multiply(rest.quaternion.clone())
+            .normalize();
         }
-        composedLocalQ = combinedDelta
-          .multiply(rest.quaternion.clone())
-          .normalize();
       }
 
       const parentWorld = parentWorldForBone(bone,worldOut,rest);
