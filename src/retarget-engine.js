@@ -917,7 +917,7 @@ function median(values){
   return a.length % 2 ? a[m] : (a[m-1]+a[m])*0.5;
 }
 
-function robustRetargetScale(records,sourceRig,targetRig,sourceRest){
+function robustRetargetScale(records,sourceRig,targetRig,sourceRest,targetRest=targetRig.rest){
   // First choice: actual visible model height captured in rest/bind pose.
   // Rig controls are NOT geometry. Two different rigs on the same character
   // can place hips/knees/poles differently even though the rendered mesh is
@@ -964,7 +964,7 @@ function robustRetargetScale(records,sourceRig,targetRig,sourceRest){
   const ratios = [];
   if (hipsRecord){
     const srcAnchor = sourceRest.get(hipsRecord.sourceBone.name)?.worldPosition;
-    const tgtAnchor = targetRig.rest.get(hipsRecord.targetBone.name)?.worldPosition;
+    const tgtAnchor = targetRest.get(hipsRecord.targetBone.name)?.worldPosition;
     if (srcAnchor && tgtAnchor){
       const usedTargets = new Set();
       for (const r of bodyRecords){
@@ -972,7 +972,7 @@ function robustRetargetScale(records,sourceRig,targetRig,sourceRest){
         usedTargets.add(r.targetBone.name);
 
         const sr = sourceRest.get(r.sourceBone.name);
-        const tr = targetRig.rest.get(r.targetBone.name);
+        const tr = targetRest.get(r.targetBone.name);
         if (!sr || !tr) continue;
 
         const ds = sr.worldPosition.distanceTo(srcAnchor);
@@ -1002,7 +1002,7 @@ function robustRetargetScale(records,sourceRig,targetRig,sourceRest){
   }
 
   const sourceHeight = bodyHeight(sourceRig,sourceRest);
-  const targetHeight = bodyHeight(targetRig,targetRig.rest);
+  const targetHeight = bodyHeight(targetRig,targetRest);
   const value = targetHeight/sourceHeight;
   return {
     value:Number.isFinite(value) && value > EPS ? value : 1,
@@ -1186,32 +1186,54 @@ export function buildRestOverrideFromPreset(sourceRig,preset,{
   return result;
 }
 
-function sourceRestForBake(sourceRig,useCurrentSourcePoseAsRest,includeLocScale=false){
-  if (!useCurrentSourcePoseAsRest) return sourceRig.rest;
+export function captureCurrentRigReference(rig,includeLocScale=false){
+  if (!rig) return new Map();
 
-  sourceRig.root.updateMatrixWorld(true);
+  rig.root.updateMatrixWorld(true);
   const map = new Map();
-  for (const bone of sourceRig.bones){
-    const base = sourceRig.rest.get(bone.name);
+
+  for (const bone of rig.bones){
+    const base = rig.rest.get(bone.name);
+    if (!base) continue;
+
     const wd = decomposeWorld(bone.matrixWorld);
     const desiredPos = includeLocScale ? wd.position : base.worldPosition;
     const desiredScale = includeLocScale ? wd.scale : base.worldScale;
+
     const world = new THREE.Matrix4().compose(
-      desiredPos.clone(),wd.quaternion.clone(),desiredScale.clone()
+      desiredPos.clone(),
+      wd.quaternion.clone(),
+      desiredScale.clone()
     );
+
     const item = cloneRestEntry(base);
     item.world = world;
     item.worldPosition = desiredPos.clone();
     item.worldQuaternion = wd.quaternion.clone();
     item.worldScale = desiredScale.clone();
+
+    // The current local rotation is the most important part of a retarget
+    // reference pose. Local translation/scale stay at bind values unless the
+    // caller explicitly opts in, so editing a reference pose cannot
+    // accidentally change limb lengths.
     item.quaternion.copy(bone.quaternion);
     if (includeLocScale){
       item.position.copy(bone.position);
       item.scale.copy(bone.scale);
+    } else {
+      item.position.copy(base.position);
+      item.scale.copy(base.scale);
     }
+
     map.set(bone.name,item);
   }
+
   return map;
+}
+
+function sourceRestForBake(sourceRig,useCurrentSourcePoseAsRest,includeLocScale=false){
+  if (!useCurrentSourcePoseAsRest) return sourceRig.rest;
+  return captureCurrentRigReference(sourceRig,includeLocScale);
 }
 
 export function previewRestPosePreset(sourceRig,preset,{
@@ -1685,6 +1707,7 @@ export async function bakeRetarget(options){
     sourcePrefix="",targetPrefix="",
     fps=30,autoScale=true,useCurrentSourcePoseAsRest=false,
     restPosePreset=null,includeRestLocationScale=false,
+    targetRestOverride=null,
     useWorldLocation=false,headSource="",headTarget="",
     correctHands=true,correctFeet=true,
     faceSettings={global:1,perRegion:false,regions:{}},
@@ -1717,6 +1740,10 @@ export async function bakeRetarget(options){
         Boolean(includeRestLocationScale)
       );
 
+  const targetRest = targetRestOverride instanceof Map && targetRestOverride.size
+    ? targetRestOverride
+    : targetRest;
+
   const records = actualPairRecords(pairs,sourceRig,targetRig,sourcePrefix,targetPrefix);
   if (!records.length) throw new Error("Ningún par del mapa existe en ambos FBX.");
 
@@ -1724,7 +1751,7 @@ export async function bakeRetarget(options){
   setRigTime(sourceRig,0);
 
   const scaleInfo = autoScale
-    ? robustRetargetScale(records,sourceRig,targetRig,sourceRest)
+    ? robustRetargetScale(records,sourceRig,targetRig,sourceRest,targetRest)
     : {value:1,method:"disabled",samples:0};
   const locationScale = scaleInfo.value;
   const step = 1 / Math.max(1,Number(fps) || 30);
@@ -1797,8 +1824,8 @@ export async function bakeRetarget(options){
     }
 
     if (!parentTarget) continue;
-    const childRest = targetRig.rest.get(childTarget);
-    const parentRest = targetRig.rest.get(parentTarget);
+    const childRest = targetRest.get(childTarget);
+    const parentRest = targetRest.get(parentTarget);
     if (!childRest || !parentRest) continue;
 
     // If the mapped anatomical parent is already an actual ancestor in the
@@ -1855,9 +1882,9 @@ export async function bakeRetarget(options){
       const sUpperRest = sourceRest.get(sUpper.name);
       const sMidRest = sourceRest.get(sMid.name);
       const sEndRest = sourceRest.get(sEnd.name);
-      const tUpperRest = targetRig.rest.get(tUpperName);
-      const tMidRest = targetRig.rest.get(tMidName);
-      const tEndRest = targetRig.rest.get(tEndName);
+      const tUpperRest = targetRest.get(tUpperName);
+      const tMidRest = targetRest.get(tMidName);
+      const tEndRest = targetRest.get(tEndName);
       if (!sUpperRest || !sMidRest || !sEndRest
         || !tUpperRest || !tMidRest || !tEndRest) continue;
 
@@ -1896,9 +1923,9 @@ export async function bakeRetarget(options){
       const sUpperRest = sourceRest.get(sUpper.name);
       const sMidRest = sourceRest.get(sMid.name);
       const sEndRest = sourceRest.get(sEnd.name);
-      const tUpperRest = targetRig.rest.get(tUpperName);
-      const tMidRest = targetRig.rest.get(tMidName);
-      const tEndRest = targetRig.rest.get(tEndName);
+      const tUpperRest = targetRest.get(tUpperName);
+      const tMidRest = targetRest.get(tMidName);
+      const tEndRest = targetRest.get(tEndName);
       if (!sUpperRest || !sMidRest || !sEndRest
         || !tUpperRest || !tMidRest || !tEndRest) continue;
 
@@ -1926,7 +1953,7 @@ export async function bakeRetarget(options){
         || resolveBone(sourceRig,"Pelvis",sourcePrefix);
       const tHipsName = sHips ? sourceToTarget.get(sHips.name) : null;
       const sHipsRest = sHips ? sourceRest.get(sHips.name) : null;
-      const tHipsRest = tHipsName ? targetRig.rest.get(tHipsName) : null;
+      const tHipsRest = tHipsName ? targetRest.get(tHipsName) : null;
 
       let sourceFootRelRest = null;
       let sourceKneeRelRest = null;
@@ -1996,7 +2023,7 @@ export async function bakeRetarget(options){
   ];
 
   const sortedBones = [...targetRig.bones].sort((a,b) =>
-    targetRig.rest.get(a.name).depth - targetRig.rest.get(b.name).depth
+    targetRest.get(a.name).depth - targetRest.get(b.name).depth
   );
 
   const qValues = new Map();
@@ -2023,11 +2050,11 @@ export async function bakeRetarget(options){
 
   const faceScale = computeFaceScale(
     sourceRig,targetRig,pairs,sourcePrefix,targetPrefix,
-    sourceRest,targetRig.rest,srcHeadBone,tgtHeadBone
+    sourceRest,targetRest,srcHeadBone,tgtHeadBone
   ) || locationScale;
 
   const srcHeadRest = srcHeadBone ? sourceRest.get(srcHeadBone.name) : null;
-  const tgtHeadRest = tgtHeadBone ? targetRig.rest.get(tgtHeadBone.name) : null;
+  const tgtHeadRest = tgtHeadBone ? targetRest.get(tgtHeadBone.name) : null;
   const srcHeadRestInv = srcHeadRest?.world.clone().invert() || null;
   const tgtHeadRestInv = tgtHeadRest?.world.clone().invert() || null;
   const headCorrectionQ = srcHeadRest && tgtHeadRest
@@ -2045,7 +2072,7 @@ export async function bakeRetarget(options){
   function rebuildWorldOut(){
     worldOut.clear();
     for (const bone of sortedBones){
-      const rest = targetRig.rest.get(bone.name);
+      const rest = targetRest.get(bone.name);
       const state = localState.get(bone.name);
       if (!rest || !state) continue;
       const parentWorld = parentWorldForBone(bone,worldOut,rest);
@@ -2076,7 +2103,7 @@ export async function bakeRetarget(options){
 
   function setBoneWorldQuaternion(name,desiredWorldQ){
     const bone = targetRig.boneMap.get(name);
-    const rest = targetRig.rest.get(name);
+    const rest = targetRest.get(name);
     const state = localState.get(name);
     if (!bone || !rest || !state) return false;
     const parentWorld = parentWorldForBone(bone,worldOut,rest);
@@ -2171,7 +2198,7 @@ export async function bakeRetarget(options){
 
     // PASS 1: rest locals + regular BASIS/WORLD location + world-delta rotation.
     for (const bone of sortedBones){
-      const rest = targetRig.rest.get(bone.name);
+      const rest = targetRest.get(bone.name);
       const localPos = rest.position.clone();
       let localQuat = rest.quaternion.clone();
       const localScale = rest.scale.clone();
@@ -2314,8 +2341,8 @@ export async function bakeRetarget(options){
     for (const childName of virtualTargets){
       const parentName = virtualParentByTarget.get(childName);
       const childBone = targetRig.boneMap.get(childName);
-      const childRest = targetRig.rest.get(childName);
-      const parentRest = targetRig.rest.get(parentName);
+      const childRest = targetRest.get(childName);
+      const parentRest = targetRest.get(parentName);
       const parentDesiredWorld = worldOut.get(parentName);
       const childState = localState.get(childName);
       if (!childBone || !childRest || !parentRest || !parentDesiredWorld || !childState) continue;
@@ -2377,9 +2404,9 @@ export async function bakeRetarget(options){
         const sUpperRest = sourceRest.get(chain.sUpper.name);
         const sMidRest = sourceRest.get(chain.sMid.name);
         const sEndRest = sourceRest.get(chain.sEnd.name);
-        const tUpperRest = targetRig.rest.get(chain.tUpperName);
-        const tMidRest = targetRig.rest.get(chain.tMidName);
-        const tEndRest = targetRig.rest.get(chain.tEndName);
+        const tUpperRest = targetRest.get(chain.tUpperName);
+        const tMidRest = targetRest.get(chain.tMidName);
+        const tEndRest = targetRest.get(chain.tEndName);
 
         if (
           sUpperRest && sMidRest && sEndRest
@@ -2664,7 +2691,7 @@ export async function bakeRetarget(options){
       // Preserve the hand's FK world orientation after the parent rotations.
       // Position is inherited naturally through DEF-Forearm_2 -> DEF-Hand.
       const endBone = targetRig.boneMap.get(chain.tEndName);
-      const endRest = targetRig.rest.get(chain.tEndName);
+      const endRest = targetRest.get(chain.tEndName);
       const endState = localState.get(chain.tEndName);
       if (!endBone || !endRest || !endState) continue;
       const endParentWorld = parentWorldForBone(endBone,worldOut,endRest);
@@ -2692,7 +2719,7 @@ export async function bakeRetarget(options){
         if (!hl.length) continue;
 
         const targetBone = targetRig.boneMap.get(targetName);
-        const targetRest = targetRig.rest.get(targetName);
+        const targetRest = targetRest.get(targetName);
         const state = localState.get(targetName);
         const parentWorld = parentWorldForBone(targetBone,worldOut,targetRest);
 
@@ -2717,7 +2744,7 @@ export async function bakeRetarget(options){
       // additional bones/controllers.
       worldOut.clear();
       for (const bone of sortedBones){
-        const rest = targetRig.rest.get(bone.name);
+        const rest = targetRest.get(bone.name);
         const state = localState.get(bone.name);
         const parentWorld = parentWorldForBone(bone,worldOut,rest);
         worldOut.set(bone.name,buildWorldFromLocal(
@@ -2771,6 +2798,7 @@ export async function bakeRetarget(options){
 
   return {
     clip,
+    targetReferenceUsed:Boolean(targetRestOverride instanceof Map && targetRestOverride.size),
     validPairs:new Set(records.map(r => r.pairIndex)).size,
     totalPairs:pairs.length,
     frameCount,
