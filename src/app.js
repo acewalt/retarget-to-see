@@ -20,7 +20,7 @@ import {
   captureRestPosePreset,
   captureCurrentRigReference,
   serializeMap
-} from "./retarget-engine.js?v=20260919-deform-export1";
+} from "./retarget-engine.js?v=20260919-original-bind2";
 
 const $ = id => document.getElementById(id);
 
@@ -913,10 +913,72 @@ function buildCleanDeformExport(targetRig,clip){
     exportRoot.add(cleanMesh);
     exportRoot.updateMatrixWorld(true);
 
-    const cleanSkeleton = new THREE.Skeleton(cleanBones);
-    cleanSkeleton.calculateInverses();
-    cleanMesh.bind(cleanSkeleton,cleanMesh.matrixWorld.clone());
+    // CRITICAL: keep the FBX skin binding exactly. FBXLoader may provide
+    // inverse bind matrices that are NOT equal to inverse(current bone world)
+    // because the skin was authored under an armature/object transform.
+    // Recomputing them with calculateInverses() was the cause of the giant
+    // spikes in Blender.
+    const originalInverses = orderedOldIndices.map(oldIndex => {
+      const inv = oldSkeleton.boneInverses?.[oldIndex];
+      if (inv?.isMatrix4) return inv.clone();
+
+      // Last-resort fallback only when the FBX did not provide one.
+      const bone = oldSkeleton.bones[oldIndex];
+      return bone.matrixWorld.clone().invert();
+    });
+
+    const cleanSkeleton = new THREE.Skeleton(
+      cleanBones,
+      originalInverses
+    );
+
+    cleanMesh.bindMode = srcMesh.bindMode;
+    cleanMesh.bind(
+      cleanSkeleton,
+      srcMesh.bindMatrix?.clone?.() || cleanMesh.matrixWorld.clone()
+    );
+    if (srcMesh.bindMatrixInverse?.isMatrix4){
+      cleanMesh.bindMatrixInverse.copy(srcMesh.bindMatrixInverse);
+    }
     cleanMesh.normalizeSkinWeights?.();
+
+    // Validate the reconstructed skin in its REST state before baking/export.
+    // If source and clean skins differ wildly here, do not create another
+    // knowingly broken GLB.
+    srcMesh.skeleton?.update?.();
+    cleanSkeleton.update();
+    srcMesh.computeBoundingBox?.();
+    cleanMesh.computeBoundingBox?.();
+
+    const srcWorldBox = srcMesh.boundingBox?.clone?.()
+      ?.applyMatrix4(srcMesh.matrixWorld);
+    const cleanWorldBox = cleanMesh.boundingBox?.clone?.()
+      ?.applyMatrix4(cleanMesh.matrixWorld);
+
+    if (
+      srcWorldBox && cleanWorldBox
+      && !srcWorldBox.isEmpty() && !cleanWorldBox.isEmpty()
+    ){
+      const srcSize = srcWorldBox.getSize(new THREE.Vector3());
+      const cleanSize = cleanWorldBox.getSize(new THREE.Vector3());
+
+      const ratios = [
+        cleanSize.x/Math.max(srcSize.x,1e-8),
+        cleanSize.y/Math.max(srcSize.y,1e-8),
+        cleanSize.z/Math.max(srcSize.z,1e-8)
+      ].filter(Number.isFinite);
+
+      const worst = ratios.reduce(
+        (m,r) => Math.max(m,Math.abs(r-1)),
+        0
+      );
+
+      if (worst > 0.05){
+        throw new Error(
+          `Validación bind falló antes de exportar: Source [${srcSize.x.toFixed(4)}, ${srcSize.y.toFixed(4)}, ${srcSize.z.toFixed(4)}] m vs Clean [${cleanSize.x.toFixed(4)}, ${cleanSize.y.toFixed(4)}, ${cleanSize.z.toFixed(4)}] m.`
+        );
+      }
+    }
 
     totalBones += cleanBones.length;
     totalMeshes++;
@@ -1032,11 +1094,19 @@ function buildCleanDeformExport(targetRig,clip){
   targetRig.root.updateMatrixWorld(true);
   exportRoot.updateMatrixWorld(true);
 
+  // Final static rest-pose bounds for diagnostics.
+  exportRoot.updateMatrixWorld(true);
+  const finalBox = new THREE.Box3().setFromObject(exportRoot,true);
+  const finalSize = finalBox.isEmpty()
+    ? new THREE.Vector3()
+    : finalBox.getSize(new THREE.Vector3());
+
   return {
     root:exportRoot,
     clip:cleanClip,
     totalBones,
-    totalMeshes
+    totalMeshes,
+    finalSize
   };
 }
 
@@ -2880,7 +2950,7 @@ async function exportGlb(){
       : "";
 
     const skeletonNote = deformOnlyInfo
-      ? ` Export limpio: ${deformOnlyInfo.totalMeshes} mesh(es), ${deformOnlyInfo.totalBones} deform bone(s); controles CloudRig excluidos y animación horneada desde matrices world.`
+      ? ` Export limpio: ${deformOnlyInfo.totalMeshes} mesh(es), ${deformOnlyInfo.totalBones} deform bone(s); inverse-bind matrices + bindMatrix originales preservados; controles CloudRig excluidos; rest bounds clean=[${deformOnlyInfo.finalSize.x.toFixed(4)}, ${deformOnlyInfo.finalSize.y.toFixed(4)}, ${deformOnlyInfo.finalSize.z.toFixed(4)}] m.`
       : " Export directo del skeleton Target.";
 
     setStatus(
