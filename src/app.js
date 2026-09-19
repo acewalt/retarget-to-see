@@ -20,7 +20,7 @@ import {
   captureRestPosePreset,
   captureCurrentRigReference,
   serializeMap
-} from "./retarget-engine.js?v=20260919-cloudrig-original-controls3";
+} from "./retarget-engine.js?v=20260919-original-names1";
 
 const $ = id => document.getElementById(id);
 
@@ -2978,7 +2978,7 @@ function cloudRigOriginalPairsForExport(){
 }
 
 function validateOriginalCloudRigControls(rig){
-  if (!rig?.cloudRigProfile) return;
+  if (!rig?.cloudRigProfile) return {resolved:[],missing:[]};
 
   const required = [
     "root","TORSO-Spine","HIP-Spine",
@@ -2988,14 +2988,162 @@ function validateOriginalCloudRigControls(rig){
     "FK-Thigh.L","FK-Knee.L","FK-Foot.L","FK-Toes.L",
     "FK-Thigh.R","FK-Knee.R","FK-Foot.R","FK-Toes.R"
   ];
-  const missing = required.filter(name => !rig.boneMap.has(name));
+
+  const resolved = [];
+  const missing = [];
+  for (const wanted of required){
+    const bone = resolveBone(rig,wanted,"");
+    if (!bone){
+      missing.push(wanted);
+      continue;
+    }
+    resolved.push({
+      wanted,
+      runtimeName:bone.name,
+      originalName:String(bone.userData?.originalName || bone.name)
+    });
+  }
+
   if (missing.length){
     throw new Error(
-      "El Target no coincide con la jerarquía CloudRig esperada. Faltan: "
+      "El Target no contiene controles CloudRig suficientes. Faltan realmente: "
       + missing.join(", ")
     );
   }
+  return {resolved,missing};
 }
+
+function originalNameForObject(obj){
+  const n = String(obj?.userData?.originalName || "").trim();
+  return n || String(obj?.name || "");
+}
+
+function prepareExactOriginalNameExport(rig,clip){
+  const savedNames = [];
+  const runtimeByName = new Map();
+
+  rig.root.traverse(obj => {
+    savedNames.push([obj,obj.name]);
+    if (obj.name && !runtimeByName.has(obj.name)) runtimeByName.set(obj.name,obj);
+  });
+
+  // Resolve tracks BEFORE renaming anything. UUID-based tracks are immune to
+  // dots/colons in Blender names and let the exporter bind the animation to
+  // the exact object while the FBX/glTF node itself uses originalName.
+  const tracks = [];
+  const unresolved = [];
+
+  for (const track of clip.tracks){
+    let parsed;
+    try{
+      parsed = THREE.PropertyBinding.parseTrackName(track.name);
+    }catch{
+      unresolved.push(track.name);
+      continue;
+    }
+
+    const node = runtimeByName.get(parsed.nodeName)
+      || THREE.PropertyBinding.findNode(rig.root,parsed.nodeName);
+
+    if (!node){
+      unresolved.push(track.name);
+      continue;
+    }
+
+    const clone = track.clone();
+    const indexSuffix = parsed.propertyIndex != null
+      ? `[${parsed.propertyIndex}]`
+      : "";
+    clone.name = `${node.uuid}.${parsed.propertyName}${indexSuffix}`;
+    tracks.push(clone);
+  }
+
+  if (unresolved.length){
+    throw new Error(
+      "No pude vincular estos canales al Target antes de exportar: "
+      + unresolved.slice(0,12).join(", ")
+    );
+  }
+
+  // r180 FBXLoader stores the untouched FBX name here. Restore ALL nodes,
+  // not only FK controls, so the exported hierarchy recovers Blender names
+  // such as FK-UpperArm.L instead of the sanitized FK-UpperArmL.
+  let restoredCount = 0;
+  rig.root.traverse(obj => {
+    const original = originalNameForObject(obj);
+    if (original && original !== obj.name){
+      obj.name = original;
+      restoredCount++;
+    }
+  });
+  rig.root.updateMatrixWorld(true);
+
+  const exportClip = new THREE.AnimationClip(
+    clip.name,
+    clip.duration,
+    tracks
+  );
+
+  return {
+    clip:exportClip,
+    restoredCount,
+    restore(){
+      for (const [obj,name] of savedNames) obj.name = name;
+      rig.root.updateMatrixWorld(true);
+    }
+  };
+}
+
+function createOriginalRigCarrier(rig){
+  // glTF only treats nodes as bones when they are joints of a skin. The
+  // original CloudRig has many FK/control bones that have no vertex weights,
+  // so a deform-only GLB drops them. A zero-area carrier skin references ALL
+  // imported Target bones, forcing glTF/Blender to keep the complete armature
+  // without exporting/rebinding the character mesh.
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute(
+    "position",
+    new THREE.Float32BufferAttribute([0,0,0, 0,0,0, 0,0,0],3)
+  );
+  geometry.setIndex([0,1,2]);
+
+  const skinIndex = new Uint16Array(12);
+  const skinWeight = new Float32Array(12);
+  skinWeight[0] = 1;
+  skinWeight[4] = 1;
+  skinWeight[8] = 1;
+  geometry.setAttribute("skinIndex",new THREE.Uint16BufferAttribute(skinIndex,4));
+  geometry.setAttribute("skinWeight",new THREE.Float32BufferAttribute(skinWeight,4));
+
+  const material = new THREE.MeshBasicMaterial({
+    transparent:true,
+    opacity:0,
+    depthWrite:false
+  });
+
+  const mesh = new THREE.SkinnedMesh(geometry,material);
+  mesh.name = "__RetargetRigCarrier__";
+  mesh.frustumCulled = false;
+
+  const skeleton = new THREE.Skeleton([...rig.bones]);
+  skeleton.calculateInverses();
+  mesh.bind(skeleton,new THREE.Matrix4());
+
+  rig.root.add(mesh);
+  rig.root.updateMatrixWorld(true);
+
+  return {
+    mesh,
+    skeleton,
+    dispose(){
+      rig.root.remove(mesh);
+      geometry.dispose();
+      material.dispose();
+      rig.root.updateMatrixWorld(true);
+    }
+  };
+}
+
 
 async function bakeOriginalRigControlClip(){
   const {sourcePrefix,targetPrefix} = currentPrefixes();
@@ -3062,47 +3210,29 @@ async function exportOriginalTargetRigFbx(){
   const rig = state.targetRig;
   const previewClip = state.retargetClip;
   const savedTime = state.currentTime;
+  let exactNames = null;
 
   state.playing = false;
   els.playBtn.textContent = "▶";
   setBusy(true);
   hideProgress();
-  setStatus("Horneando FK sobre los controles ORIGINALES del Target…");
+  setStatus("Horneando Action sobre los controles originales del Target…");
 
   try{
-    validateOriginalCloudRigControls(rig);
-
-    // IMPORTANT: this is a SECOND bake. The viewport clip targets DEF bones
-    // because an FBX has no CloudRig constraints. The portable Blender Action
-    // instead targets FK/control bones from the original hierarchy supplied by
-    // the user: FK-UpperArm.*, FK-Thigh.*, HIP-Spine, TORSO-Spine, root, etc.
+    const validation = validateOriginalCloudRigControls(rig);
     const direct = await bakeOriginalRigControlClip();
-    const clip = direct.clip;
 
     resetRigToRest(rig);
     rig.root.updateMatrixWorld(true);
+
+    exactNames = prepareExactOriginalNameExport(rig,direct.clip);
+    const exportClip = exactNames.clip;
 
     const hierarchy = countExportableOriginalRigNodes(rig.root);
     if (hierarchy.bones !== rig.bones.length){
       throw new Error(
         "La jerarquía Target cambió antes de exportar: "
         + hierarchy.bones + " vs " + rig.bones.length + " huesos."
-      );
-    }
-
-    const animatedNames = new Set(
-      clip.tracks
-        .map(t => String(t.name || "").replace(/\.(position|quaternion|scale)$/,""))
-        .filter(Boolean)
-    );
-
-    const unresolved = [...animatedNames].filter(name =>
-      name !== rig.root.name && !rig.boneMap.has(name)
-    );
-    if (unresolved.length){
-      throw new Error(
-        "La Action directa contiene canales que no existen en el Target original: "
-        + unresolved.slice(0,12).join(", ")
       );
     }
 
@@ -3116,16 +3246,13 @@ async function exportOriginalTargetRigFbx(){
       bakeSpaceTransform:false,
       version:7400,
       fps,
-      animations:[clip],
+      animations:[exportClip],
       includeAnimations:true,
       embedTextures:false,
       onlyVisible:false,
-      // Action-transfer FBX: same Target hierarchy, no mesh/skin. This avoids
-      // every GLB bind/skin reconstruction problem while preserving all bone
-      // names, parents and local spaces needed by Blender's Action importer.
       objectFilter:(obj) => !obj.isMesh && !obj.isLight && !obj.isCamera,
       customProperties:false,
-      creator:"Retarget to See - exact Target hierarchy / original FK controls"
+      creator:"Retarget to See - original Target hierarchy and names"
     });
 
     if (!(bytes instanceof Uint8Array) || bytes.byteLength < 1024){
@@ -3140,16 +3267,20 @@ async function exportOriginalTargetRigFbx(){
       name
     );
 
-    const controlNames = [...animatedNames]
-      .filter(n => /^(FK-|HIP-Spine$|TORSO-Spine$|root$)/.test(n))
-      .slice(0,32);
+    const sample = validation.resolved.slice(0,8)
+      .map(x => x.runtimeName === x.originalName
+        ? x.originalName
+        : `${x.runtimeName}→${x.originalName}`
+      )
+      .join(", ");
 
     setStatus(
-      "FBX compatible con RIG original exportado: " + name
-      + ". Jerarquía reutilizada: " + hierarchy.bones + " huesos; "
-      + clip.tracks.length + " canales. Action: " + clip.name
-      + ". Controles horneados: " + controlNames.join(", ")
-      + ". No se usó DeformExport ni se reconstruyó el skeleton.",
+      "FBX RIG original exportado: " + name
+      + ". " + hierarchy.bones + " huesos de la jerarquía Target; "
+      + exactNames.restoredCount + " nombres FBX originales restaurados. "
+      + "La Action " + direct.clip.name
+      + " está vinculada por UUID durante la escritura, así que .L/.R y otros "
+      + "nombres originales se conservan en el FBX. Ejemplos: " + sample + ".",
       "success"
     );
   }catch(err){
@@ -3159,6 +3290,7 @@ async function exportOriginalTargetRigFbx(){
       "error"
     );
   }finally{
+    if (exactNames) exactNames.restore();
     resetRigToRest(rig);
     activateClip(rig,previewClip);
     setRigTime(
@@ -3172,84 +3304,86 @@ async function exportOriginalTargetRigFbx(){
 }
 
 async function exportGlb(){
-  if (!state.targetRig || !state.retargetClip) return;
-  const clip = state.retargetClip;
+  if (!state.targetRig || !state.retargetClip || !state.sourceClip || state.busy) return;
+
+  const rig = state.targetRig;
+  const previewClip = state.retargetClip;
+  const savedTime = state.currentTime;
+  const hidden = [];
+  let exactNames = null;
+  let carrier = null;
+
   state.playing = false;
+  els.playBtn.textContent = "▶";
   setBusy(true);
-  setStatus("Preparando GLB…");
+  hideProgress();
+  setStatus("Preparando GLB con el RIG original completo…");
 
   try{
-    resetRigToRest(state.targetRig);
-    state.targetRig.root.updateMatrixWorld(true);
+    validateOriginalCloudRigControls(rig);
+    const direct = await bakeOriginalRigControlClip();
 
-    let exportRoot = state.targetRig.root;
-    let exportClip = clip;
-    let deformOnlyInfo = null;
+    resetRigToRest(rig);
+    rig.root.updateMatrixWorld(true);
 
-    if (state.targetRig.cloudRigProfile){
-      setStatus("Construyendo skeleton deform-only para GLB…");
-      deformOnlyInfo = buildCleanDeformExport(
-        state.targetRig,
-        clip
-      );
-      exportRoot = deformOnlyInfo.root;
-      exportClip = deformOnlyInfo.clip;
-    }
+    exactNames = prepareExactOriginalNameExport(rig,direct.clip);
+    carrier = createOriginalRigCarrier(rig);
 
-    const scaleInfo = exportScaleReport(exportRoot);
+    // Do not export the original character meshes: they were the source of
+    // previous bind/scale explosions. The invisible carrier keeps all 342
+    // Target bones as glTF skin joints, including FK/IK/control bones.
+    rig.root.traverse(obj => {
+      if (!obj.isMesh || obj === carrier.mesh) return;
+      hidden.push([obj,obj.visible]);
+      obj.visible = false;
+    });
+
     const exporter = new GLTFExporter();
-    const result = await parseGlbWithFallback(
-      exporter,
-      exportRoot,
-      exportClip
-    );
+    const data = await exporter.parseAsync(rig.root,{
+      binary:true,
+      trs:true,
+      onlyVisible:true,
+      animations:[exactNames.clip],
+      includeCustomExtensions:true
+    });
 
-    const name = safeBaseName(state.targetRig.fileName || "target")
-      + (deformOnlyInfo ? "_retargeted_deform.glb" : "_retargeted.glb");
+    const name = safeBaseName(rig.fileName || "target")
+      + "_retargeted_originalRig.glb";
+
     downloadBlob(
-      new Blob([result.data],{type:"model/gltf-binary"}),
+      new Blob([data],{type:"model/gltf-binary"}),
       name
     );
 
-    applySolidWhiteViewport(state.targetRig.root);
-    activateClip(state.targetRig,clip);
-    seek(0);
-
-    const rs = scaleInfo.rootScale;
-    const ws = scaleInfo.worldSize;
-    const materialNote = result.materialMode === "white-fallback"
-      ? " Materiales: fallback blanco sin texturas."
-      : result.strippedTextures
-        ? ` Materiales originales; ${result.strippedTextures} textura(s) inválida(s) omitida(s).`
-        : " Materiales originales.";
-
-    const nodeScaleNote = scaleInfo.nonUnitObjects.length
-      ? " Escalas internas preservadas: "
-        + scaleInfo.nonUnitObjects.map(x =>
-          `${x.name}=[${x.x.toFixed(4)},${x.y.toFixed(4)},${x.z.toFixed(4)}]`
-        ).join("; ")
-        + "."
-      : "";
-
-    const skeletonNote = deformOnlyInfo
-      ? ` Export limpio: ${deformOnlyInfo.totalMeshes} mesh(es), ${deformOnlyInfo.totalBones} deform bone(s); geometría skinned horneada a world/meters como nuevo bind mesh; bindMatrix identidad + inverse-bind nuevas; controles CloudRig excluidos; rest bounds clean=[${deformOnlyInfo.finalSize.x.toFixed(4)}, ${deformOnlyInfo.finalSize.y.toFixed(4)}, ${deformOnlyInfo.finalSize.z.toFixed(4)}] m.`
-      : " Export directo del skeleton Target.";
-
     setStatus(
-      `GLB exportado: ${name}. Root scale=[${rs.x.toFixed(4)}, ${rs.y.toFixed(4)}, ${rs.z.toFixed(4)}]. Bounds world=[${ws.x.toFixed(4)}, ${ws.y.toFixed(4)}, ${ws.z.toFixed(4)}] m. FBX→glTF en metros.${skeletonNote}${nodeScaleNote}${materialNote}`,
+      "GLB RIG original exportado: " + name
+      + ". Se conservaron " + rig.bones.length
+      + " huesos del Target como joints, incluidos FK/IK/controles; "
+      + exactNames.restoredCount
+      + " nombres originales restaurados. La malla del personaje no se exportó.",
       "success"
     );
   }catch(err){
     console.error(err);
-    applySolidWhiteViewport(state.targetRig.root);
-    activateClip(state.targetRig,clip);
-    seek(0);
     setStatus(
-      `Falló la exportación GLB: ${err.message || err}`,
+      "Falló el GLB para RIG original: " + (err.message || err),
       "error"
     );
   }finally{
+    for (const [obj,visible] of hidden) obj.visible = visible;
+    if (carrier) carrier.dispose();
+    if (exactNames) exactNames.restore();
+
+    resetRigToRest(rig);
+    activateClip(rig,previewClip);
+    setRigTime(
+      rig,
+      Math.max(0,Math.min(savedTime,previewClip.duration || 0))
+    );
+    applySolidWhiteViewport(rig.root);
+    rig.root.updateMatrixWorld(true);
     setBusy(false);
+    hideProgress();
   }
 }
 
