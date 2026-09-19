@@ -20,7 +20,7 @@ import {
   captureRestPosePreset,
   captureCurrentRigReference,
   serializeMap
-} from "./retarget-engine.js?v=20260919-original-target-fbx1";
+} from "./retarget-engine.js?v=20260919-original-target-fbx2";
 
 const $ = id => document.getElementById(id);
 
