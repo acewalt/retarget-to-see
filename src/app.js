@@ -61,6 +61,7 @@ const els = {
   autoBakeIk:$("autoBakeIk"),
   useWorldLocation:$("useWorldLocation"),
   correctHands:$("correctHands"),
+  correctFeet:$("correctFeet"),
   headSource:$("headSource"),
   headTarget:$("headTarget"),
   facePerRegion:$("facePerRegion"),
@@ -1084,6 +1085,7 @@ function buildBoneMapDiagnostic(){
       auto_scale:Boolean(els.autoScale.checked),
       use_world_location:Boolean(els.useWorldLocation.checked),
       correct_hands:Boolean(els.correctHands.checked),
+      correct_feet:Boolean(els.correctFeet.checked),
       use_current_source_pose_as_rest:Boolean(els.useCurrentRest.checked),
       use_custom_rest_pose:Boolean(els.useCustomRest.checked),
       custom_rest_pose_name:state.restPosePreset?.name || null,
@@ -1666,6 +1668,7 @@ async function applyRetarget(){
       sourceRestTime:restTime,
       useWorldLocation:els.useWorldLocation.checked,
       correctHands:els.correctHands.checked,
+      correctFeet:els.correctFeet.checked,
       headSource:els.headSource.value,
       headTarget:els.headTarget.value,
       faceSettings:faceSettings(),
@@ -1703,6 +1706,9 @@ async function applyRetarget(){
     const handCorrectionText = result.handEndEffectorCorrection
       ? ` Corrección de manos activa: ${result.handEndEffectorChains.length} brazos, solo rotación 2-bone.`
       : "";
+    const footCorrectionText = result.footEndEffectorCorrection
+      ? ` Corrección de pies activa: ${result.footEndEffectorChains.length} piernas, solo rotación 2-bone.`
+      : "";
     const splitRootText = result.splitRootMappings?.length
       ? ` Set-as-Root separado: ${result.splitRootMappings.join("; ")} (ROT al deform, LOC al objeto).`
       : "";
@@ -1711,7 +1717,7 @@ async function applyRetarget(){
           .map(x => `${x.sources.join("+")}→${x.target}`)
           .join("; ")}.`
       : "";
-    let message = `Retarget FK terminado: ${result.validPairs}/${result.totalPairs} pares, cuerpo ${coverage.coreValid}/${coverage.coreTotal}, dedos ${coverage.fingerValid}/${coverage.fingerTotal}, ${result.frameCount} frames, scale ${result.locationScale.toFixed(4)}${scaleMethod}.${rootMotionText}${rootRotationText}${rootTranslationText}${pelvisSafetyText}${virtualChainText}${naturalHierarchyText}${handCorrectionText}${splitRootText}${collapsedText}${redirectedText}${unresolvedText}`;
+    let message = `Retarget FK terminado: ${result.validPairs}/${result.totalPairs} pares, cuerpo ${coverage.coreValid}/${coverage.coreTotal}, dedos ${coverage.fingerValid}/${coverage.fingerTotal}, ${result.frameCount} frames, scale ${result.locationScale.toFixed(4)}${scaleMethod}.${rootMotionText}${rootRotationText}${rootTranslationText}${pelvisSafetyText}${virtualChainText}${naturalHierarchyText}${handCorrectionText}${footCorrectionText}${splitRootText}${collapsedText}${redirectedText}${unresolvedText}`;
 
     if (els.autoBakeIk.checked && state.ikChains.length){
       try{
