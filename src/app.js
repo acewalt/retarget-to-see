@@ -20,8 +20,8 @@ import {
   captureRestPosePreset,
   captureCurrentRigReference,
   serializeMap
-} from "./retarget-engine.js?v=20260919-deform-controls3";
-import { injectAnimationIntoOriginalFbx } from "./fbx-animation-injector.js?v=20260919-deform-controls3";
+} from "./retarget-engine.js?v=20260919-generic-exact1";
+import { injectAnimationIntoOriginalFbx } from "./fbx-animation-injector.js?v=20260919-generic-exact1";
 
 const $ = id => document.getElementById(id);
 
@@ -2968,60 +2968,30 @@ async function loadOriginalRigFbxExporter(){
   return mod.FBXExporter;
 }
 
-function cloudRigOriginalPairsForExport(){
-  if (!state.targetRig?.cloudRigProfile){
-    return state.pairs.map(p => ({...p}));
-  }
-
-  // The previous web preset intentionally rewired the torso for DEF-only
-  // preview. That is wrong for an Action that will be applied to the actual
-  // CloudRig in Blender. Restore BlendCap's real Mixamo→CloudRig control map:
-  // Hips rotates HIP-Spine, vertical motion goes to TORSO-Spine, horizontal
-  // locomotion goes to root, then Spine/FK-Spine and Spine1/FK-Chest.
-  const torsoSources = new Set(["hips","spine","spine1","spine2"]);
-  const torsoTargets = new Set([
-    "hipspine","torsospine","root","fkspine","fkchest"
-  ]);
-
-  const kept = state.pairs
-    .filter(p => {
-      const s = String(p.source || "").toLowerCase().replace(/[^a-z0-9]/g,"");
-      const t = String(p.target || "").toLowerCase().replace(/[^a-z0-9]/g,"");
-      return !(torsoSources.has(s) && torsoTargets.has(t));
-    })
-    .map(p => ({...p}));
-
-  kept.push(
-    {source:"Spine1",target:"FK-Chest",channels:"ROT",influence:1},
-    {source:"Spine",target:"FK-Spine",channels:"ROT",influence:1},
-    {source:"Hips",target:"HIP-Spine",channels:"ROT",influence:1},
-    {source:"Hips",target:"TORSO-Spine",channels:"LOC",axes:"Z",influence:1},
-    {source:"Hips",target:"root",channels:"LOC",axes:"XY",influence:1}
-  );
-
-  return kept;
+function exactTargetPairsForExport(){
+  // Exact FBX export is rig-agnostic. It uses the user's current Bone Map
+  // exactly as authored, regardless of whether the Target is CloudRig,
+  // Mixamo, Rigify, ARP, Unreal, a custom Blender rig, etc.
+  return (state.pairs || []).map(p => ({...p}));
 }
 
-function validateOriginalCloudRigControls(rig){
-  if (!rig?.cloudRigProfile) return {resolved:[],missing:[]};
+function validateExactTargetRig(rig,pairs){
+  if (!rig) throw new Error("No hay Target cargado.");
 
-  const required = [
-    "root","TORSO-Spine","HIP-Spine",
-    "FK-Spine","FK-Chest","FK-Neck","FK-Head",
-    "FK-Shoulder.L","FK-UpperArm.L","FK-Forearm.L","FK-Hand.L",
-    "FK-Shoulder.R","FK-UpperArm.R","FK-Forearm.R","FK-Hand.R",
-    "FK-Thigh.L","FK-Knee.L","FK-Foot.L","FK-Toes.L",
-    "FK-Thigh.R","FK-Knee.R","FK-Foot.R","FK-Toes.R"
-  ];
-
+  const {targetPrefix} = currentPrefixes();
   const resolved = [];
   const missing = [];
-  for (const wanted of required){
-    const bone = resolveBone(rig,wanted,"");
+
+  for (const pair of pairs || []){
+    const wanted = String(pair?.target || "").trim();
+    if (!wanted) continue;
+
+    const bone = resolveBone(rig,wanted,targetPrefix);
     if (!bone){
       missing.push(wanted);
       continue;
     }
+
     resolved.push({
       wanted,
       runtimeName:bone.name,
@@ -3029,13 +2999,17 @@ function validateOriginalCloudRigControls(rig){
     });
   }
 
-  if (missing.length){
+  if (!resolved.length){
     throw new Error(
-      "El Target no contiene controles CloudRig suficientes. Faltan realmente: "
-      + missing.join(", ")
+      "El Bone Map no resuelve ningún hueso real del Target. "
+      + "Configura al menos un par Source → Target válido antes de exportar."
     );
   }
-  return {resolved,missing};
+
+  return {
+    resolved,
+    missing:[...new Set(missing)]
+  };
 }
 
 function originalNameForObject(obj){
@@ -3119,67 +3093,56 @@ function prepareExactOriginalNameExport(rig,clip){
   };
 }
 
-function mergeExactTargetClips(previewClip,controlClip,rig){
-  if (!previewClip) throw new Error("No existe el clip deformado del viewport.");
+function mergeExactTargetClips(previewClip,mappedClip,rig){
+  if (!previewClip) throw new Error("No existe el clip retargeteado del viewport.");
 
-  // IMPORTANT:
-  // The viewport clip can contain a scene/root-object track such as
-  // "x1.position". That object is a Three.js/FBXLoader container and is NOT
-  // necessarily a Model node in the user's original FBX. Injecting such a
-  // track caused:
-  //   "La Action intenta animar x1 pero ese Model no existe..."
+  // Generic rule for ANY FBX rig:
+  // keep only animation channels whose target is an actual Bone in the imported
+  // Target. Scene/group/container tracks created by FBXLoader (x1.position,
+  // Armature.position, etc.) are never injected into the original FBX unless
+  // they correspond to a real Bone model.
   //
-  // For the exact FBX we only take deformation tracks whose target is one of
-  // the original weighted bones. Root/global motion comes from the direct
-  // CloudRig control bake (the actual "root" control), never from rig.root.
+  // The viewport/evaluated clip comes first because it is what visibly drives
+  // the Target result, including weighted deformation bones on rigs whose
+  // control constraints were lost in FBX.
   const byName = new Map();
-  const weighted = rig?.weightedBoneNames || new Set();
+  const rejectedTracks = [];
 
-  for (const track of previewClip.tracks || []){
-    let parsed = null;
-    try{
-      parsed = THREE.PropertyBinding.parseTrackName(track.name);
-    }catch{
-      parsed = null;
+  const addBoneTracks = (clip,label,overwrite=false) => {
+    for (const track of clip?.tracks || []){
+      let parsed = null;
+      try{
+        parsed = THREE.PropertyBinding.parseTrackName(track.name);
+      }catch{
+        parsed = null;
+      }
+
+      const nodeName = parsed?.nodeName || "";
+      const bone = rig?.boneMap?.get(nodeName) || null;
+
+      if (!bone){
+        rejectedTracks.push(label + ":" + track.name);
+        continue;
+      }
+
+      if (overwrite || !byName.has(track.name)){
+        byName.set(track.name,track.clone());
+      }
     }
-    const nodeName = parsed?.nodeName || "";
-    if (!weighted.has(nodeName)) continue;
-    byName.set(track.name,track.clone());
+  };
+
+  addBoneTracks(previewClip,"preview",true);
+  addBoneTracks(mappedClip,"mapped",false);
+
+  if (!byName.size){
+    throw new Error(
+      "No quedó ningún track dirigido a huesos reales del Target después de filtrar contenedores."
+    );
   }
-
-  // Controls/FK/root are added from the ORIGINAL_RIG bake, but only
-  // when the track target is an ACTUAL Bone from the imported Target.
-  // bakeRetarget can still emit a scene-container track such as x1.position;
-  // that object is not a Model in the original FBX and must never reach the
-  // binary injector.
-  const rejectedControlTracks = [];
-  for (const track of controlClip?.tracks || []){
-    let parsed = null;
-    try{
-      parsed = THREE.PropertyBinding.parseTrackName(track.name);
-    }catch{
-      parsed = null;
-    }
-
-    const nodeName = parsed?.nodeName || "";
-    const bone = rig?.boneMap?.get(nodeName) || null;
-
-    if (!bone){
-      rejectedControlTracks.push(track.name);
-      continue;
-    }
-
-    if (!byName.has(track.name)){
-      byName.set(track.name,track.clone());
-    }
-  }
-
-  // Keep this diagnostic on the clip for the export status/error path.
-  const rejected = rejectedControlTracks;
 
   const duration = Math.max(
     Number(previewClip.duration) || 0,
-    Number(controlClip?.duration) || 0
+    Number(mappedClip?.duration) || 0
   );
 
   const merged = new THREE.AnimationClip(
@@ -3187,10 +3150,12 @@ function mergeExactTargetClips(previewClip,controlClip,rig){
     duration,
     [...byName.values()]
   );
+
   merged.userData = {
     ...(merged.userData || {}),
-    rejectedNonBoneTracks:rejected
+    rejectedNonBoneTracks:rejectedTracks
   };
+
   return merged;
 }
 
@@ -3234,27 +3199,34 @@ function assertExactClipTargetsOnlyTargetBones(rig,clip){
 
 function assertExactClipDrivesWeightedBones(rig,clip){
   const weighted = rig?.weightedBoneNames || new Set();
-  if (!weighted.size) return {animatedWeighted:[],totalWeighted:0};
+  if (!weighted.size){
+    return {
+      animatedWeighted:[],
+      totalWeighted:0,
+      hasSkinWeights:false
+    };
+  }
 
   const targets = clipTargetNodeNames(clip);
   const animatedWeighted = [...weighted].filter(name => targets.has(name));
 
-  // This is intentionally a hard gate for CloudRig. The broken export the
-  // user reported animated 23 FK/control bones and ZERO weighted DEF bones,
-  // which produces a motionless mesh plus a split-looking armature.
-  if (rig.cloudRigProfile && animatedWeighted.length === 0){
+  // Rig-agnostic hard gate. If the FBX has skinned/weighted bones but none of
+  // them are animated, Blender will import a valid-looking Action while the
+  // mesh stays frozen. Never export that broken case, regardless of rig type.
+  if (animatedWeighted.length === 0){
     throw new Error(
-      "La Action exacta no contiene ningún DEF con pesos. "
-      + "Se bloqueó la descarga para evitar otro FBX con controles animados "
-      + "pero malla inmóvil."
+      "El Target tiene huesos con pesos, pero la Action exacta no anima ninguno. "
+      + "Se bloqueó la descarga para evitar un FBX con malla inmóvil."
     );
   }
 
   return {
     animatedWeighted:animatedWeighted.sort(),
-    totalWeighted:weighted.size
+    totalWeighted:weighted.size,
+    hasSkinWeights:true
   };
 }
+
 
 function createOriginalRigCarrier(rig){
   // glTF only treats nodes as bones when they are joints of a skin. The
@@ -3307,7 +3279,7 @@ function createOriginalRigCarrier(rig){
 }
 
 
-async function bakeOriginalRigControlClip(){
+async function bakeExactTargetMappedClip(){
   const {sourcePrefix,targetPrefix} = currentPrefixes();
   const restTime = els.useTargetReference.checked
     && Number.isFinite(state.targetReferenceSourceTime)
@@ -3318,7 +3290,7 @@ async function bakeOriginalRigControlClip(){
     && state.restPosePreset
     && builtInRestPoseCompatible();
 
-  const pairs = cloudRigOriginalPairsForExport();
+  const pairs = exactTargetPairsForExport();
 
   const result = await bakeRetarget({
     sourceRig:state.sourceRig,
@@ -3334,8 +3306,9 @@ async function bakeOriginalRigControlClip(){
     sourceRestTime:restTime,
     targetRestOverride:els.useTargetReference.checked ? state.targetRestOverride : null,
     useWorldLocation:els.useWorldLocation.checked,
-    // The Blender CloudRig will evaluate its own FK constraints. The browser
-    // preview-only 2-bone fixes must not be baked into the reusable FK Action.
+    // Exact-target export must be portable across arbitrary FBX rigs.
+    // Browser-only end-effector corrections are already represented by the
+    // evaluated preview clip; do not bake a second corrective solver here.
     correctHands:false,
     correctFeet:false,
     headSource:els.headSource.value,
@@ -3345,7 +3318,7 @@ async function bakeOriginalRigControlClip(){
     onProgress:setProgress
   });
 
-  result.clip.name = "Retargeted_OriginalRig_FK";
+  result.clip.name = "Retargeted_OriginalTarget_Map";
   return {clip:result.clip,pairs,result};
 }
 
@@ -3384,19 +3357,21 @@ async function exportOriginalTargetRigFbx(){
   els.playBtn.textContent = "▶";
   setBusy(true);
   hideProgress();
-  setStatus("Preparando FBX exacto: DEF + controles sobre el Target original…");
+  setStatus("Preparando FBX exacto sobre el Target original, sin asumir tipo de rig…");
 
   try{
-    validateOriginalCloudRigControls(rig);
+    const pairs = exactTargetPairsForExport();
+    const validation = validateExactTargetRig(rig,pairs);
 
-    // Bake the original FK/control layer, but DO NOT use it alone. An FBX does
-    // not carry Blender's CloudRig constraints, so FK-only animation cannot
-    // drive the weighted DEF skeleton after re-import.
-    const direct = await bakeOriginalRigControlClip();
+    // Bake the user's Bone Map directly onto real Target bones, then merge it
+    // with the evaluated viewport result. This works for any rig style:
+    // deform-only skeletons, FK rigs, control rigs, Mixamo, Rigify/ARP exports,
+    // Unreal-style rigs, or custom armatures.
+    const direct = await bakeExactTargetMappedClip();
 
-    // The viewport clip is already the evaluated deformation result that the
-    // user sees on the Target mesh. Merge it with the control bake so the same
-    // FBX contains animated DEF bones AND the corresponding FK controls.
+    // The viewport clip contributes every valid Target-bone channel that was
+    // needed to produce the visible result. The direct map contributes original
+    // mapped controls/bones. Non-bone container tracks are removed generically.
     const exactClip = mergeExactTargetClips(previewClip,direct.clip,rig);
     assertExactClipTargetsOnlyTargetBones(rig,exactClip);
     const coverage = assertExactClipDrivesWeightedBones(rig,exactClip);
@@ -3449,10 +3424,8 @@ async function exportOriginalTargetRigFbx(){
 
     const d = injected.diagnostics;
     const i = d.integrity || {};
-    const controlTargets = d.mappedTargets.filter(n =>
-      /^(FK-|HIP-Spine$|TORSO-Spine$|root$)/.test(n)
-    );
-    const deformTargets = d.mappedTargets.filter(n => /^DEF-/.test(n));
+    const animatedBoneTargets = d.mappedTargets;
+    const rejected = exactClip.userData?.rejectedNonBoneTracks || [];
 
     setStatus(
       "FBX exacto exportado y verificado: " + name
@@ -3461,14 +3434,19 @@ async function exportOriginalTargetRigFbx(){
       + (i.meshes ?? "?") + " Mesh, "
       + (i.skins ?? "?") + " Skin, "
       + (i.clusters ?? "?") + " Clusters. "
-      + "La Action ahora anima " + deformTargets.length
-      + " DEF del archivo (" + coverage.animatedWeighted.length
-      + "/" + coverage.totalWeighted + " grupos con peso detectados) y "
-      + controlTargets.length + " controles FK/root. "
-      + "Tracks contenedor descartados: "
-      + ((exactClip.userData?.rejectedNonBoneTracks || []).join(", ") || "ninguno")
-      + ". El movimiento global válido lo lleva el hueso/control root real del Target. "
-      + "No se permite que x1.position/x1.quaternion u otros contenedores entren al FBX.",
+      + "La Action anima " + animatedBoneTargets.length
+      + " huesos reales del Target"
+      + (coverage.hasSkinWeights
+        ? " y cubre " + coverage.animatedWeighted.length + "/" + coverage.totalWeighted
+          + " huesos con pesos detectados"
+        : "")
+      + ". Pares del Bone Map resueltos: " + validation.resolved.length
+      + (validation.missing.length
+        ? "; no resueltos: " + validation.missing.slice(0,12).join(", ")
+        : "")
+      + ". Tracks de contenedor descartados: "
+      + (rejected.length ? rejected.slice(0,12).join(", ") : "ninguno")
+      + ". Esta ruta no depende de nombres DEF/FK ni de un tipo de rig concreto.",
       "success"
     );
   }catch(err){
