@@ -19,7 +19,7 @@ import {
   previewRestPosePreset,
   captureRestPosePreset,
   serializeMap
-} from "./retarget-engine.js?v=20260919-pelvis-y-axis1";
+} from "./retarget-engine.js?v=20260919-setroot-spine1";
 
 const $ = id => document.getElementById(id);
 
