@@ -300,7 +300,7 @@
           FBX Action · RIG original
         </button>
         <p class="hint">
-          Exporta el mismo esqueleto/hierarquía del Target importado, sin reconstruirlo y sin malla, con la Action retargeteada dentro del FBX. En Blender importa este FBX y usa su Action sobre tu armature original.
+          Exporta el MISMO esqueleto/hierarquía del Target importado, sin reconstruirlo y sin malla. Para CloudRig la Action se hornea sobre los controles originales (FK-*, HIP-Spine, TORSO-Spine y root), no sobre DEF-*; en Blender importa el FBX y reutiliza esa Action en tu RIG-Sintel original.
         </p>
         <div class="progress-wrap" id="progressWrap" hidden>
           <div class="progress-track"><div id="progressBar"></div></div>
@@ -320,6 +320,6 @@
     Port web del retargeting inspirado en <a href="https://github.com/Arcomade/BlendCap" target="_blank" rel="noreferrer">BlendCap</a> · GPL-3.0 · sin garantía.
   </footer>
 
-  <script type="module" src="./src/app.js?v=20260919-original-target-fbx2"></script>
+  <script type="module" src="./src/app.js?v=20260919-cloudrig-original-controls1"></script>
 </body>
 </html>
