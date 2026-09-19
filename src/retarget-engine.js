@@ -2286,8 +2286,18 @@ export async function bakeRetarget(options){
         );
         setBoneWorldQuaternion(
           chain.tUpperName,
-          swing.multiply(upperWorldQ).normalize()
+          swing.clone().multiply(upperWorldQ).normalize()
         );
+
+        if (chain.tUpperControlName){
+          const controlQ = worldQuaternionOf(chain.tUpperControlName);
+          if (controlQ){
+            setBoneWorldQuaternion(
+              chain.tUpperControlName,
+              swing.clone().multiply(controlQ).normalize()
+            );
+          }
+        }
         rebuildWorldOut();
       }
 
@@ -2309,8 +2319,18 @@ export async function bakeRetarget(options){
           );
           setBoneWorldQuaternion(
             chain.tMidName,
-            swing.multiply(foreWorldQ).normalize()
+            swing.clone().multiply(foreWorldQ).normalize()
           );
+
+          if (chain.tMidControlName){
+            const controlQ = worldQuaternionOf(chain.tMidControlName);
+            if (controlQ){
+              setBoneWorldQuaternion(
+                chain.tMidControlName,
+                swing.clone().multiply(controlQ).normalize()
+              );
+            }
+          }
           rebuildWorldOut();
         }
       }
@@ -2450,6 +2470,8 @@ export async function bakeRetarget(options){
     virtualChainStabilizedCount:virtualTargets.length,
     naturalHierarchyTargets:naturallyConnectedVirtualTargets,
     naturalHierarchyTargetCount:naturallyConnectedVirtualTargets.length,
+    staticBodyFrameRemap:Boolean(sourceBodyFrame && targetBodyFrame),
+    fkControlSolverSync:Boolean(controlMirrorBySource.size),
     handEndEffectorCorrection:Boolean(correctHands),
     handEndEffectorChains:armCorrectionChains.map(c => ({
       side:c.side,
