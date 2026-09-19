@@ -20,7 +20,7 @@ import {
   captureRestPosePreset,
   captureCurrentRigReference,
   serializeMap
-} from "./retarget-engine.js?v=20260919-target-reference1";
+} from "./retarget-engine.js?v=20260919-target-reference2";
 
 const $ = id => document.getElementById(id);
 
