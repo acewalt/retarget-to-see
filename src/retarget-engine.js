@@ -152,6 +152,58 @@ function decomposeWorld(matrix){
   return {position, quaternion, scale};
 }
 
+function computeVisibleRestBounds(root){
+  // Measure the actual rendered model, not control/pole/helper bones.
+  // This is captured before animation is activated, so it is a stable
+  // rest/bind-space visual size reference for both viewport framing and
+  // retarget translation scale.
+  root.updateMatrixWorld(true);
+  const box = new THREE.Box3();
+  let initialized = false;
+  let meshCount = 0;
+
+  root.traverse(obj => {
+    if (!obj.isMesh || !obj.geometry) return;
+
+    const g = obj.geometry;
+    if (!g.boundingBox) g.computeBoundingBox?.();
+    if (!g.boundingBox || g.boundingBox.isEmpty()) return;
+
+    const b = g.boundingBox.clone().applyMatrix4(obj.matrixWorld);
+    if (b.isEmpty()) return;
+
+    if (!initialized){
+      box.copy(b);
+      initialized = true;
+    } else {
+      box.union(b);
+    }
+    meshCount++;
+  });
+
+  if (!initialized){
+    return {
+      valid:false,
+      meshCount:0,
+      box:null,
+      center:new THREE.Vector3(),
+      size:new THREE.Vector3(),
+      height:0
+    };
+  }
+
+  const center = box.getCenter(new THREE.Vector3());
+  const size = box.getSize(new THREE.Vector3());
+  return {
+    valid:true,
+    meshCount,
+    box,
+    center,
+    size,
+    height:Math.max(Math.abs(size.y),EPS)
+  };
+}
+
 export function createRigState(root, fileName=""){
   root.updateMatrixWorld(true);
   const bones = [];
@@ -237,9 +289,12 @@ export function createRigState(root, fileName=""){
     });
   }
 
+  const visualRest = computeVisibleRestBounds(root);
+
   const rig = {
     root,
     rootRest:cloneTransform(root),
+    visualRest,
     fileName,
     bones,
     boneMap,
@@ -842,9 +897,40 @@ function median(values){
 }
 
 function robustRetargetScale(records,sourceRig,targetRig,sourceRest){
-  // Prefer scale inferred from corresponding mapped body landmarks. This
-  // avoids CloudRig pole/control bones making the target hundreds of times
-  // "larger" than the visible character.
+  // First choice: actual visible model height captured in rest/bind pose.
+  // Rig controls are NOT geometry. Two different rigs on the same character
+  // can place hips/knees/poles differently even though the rendered mesh is
+  // identical; bone-landmark scale therefore creates false scale changes.
+  const sourceMeshHeight = Number(sourceRig?.visualRest?.height || 0);
+  const targetMeshHeight = Number(targetRig?.visualRest?.height || 0);
+
+  if (
+    sourceMeshHeight > EPS
+    && targetMeshHeight > EPS
+    && Number.isFinite(sourceMeshHeight)
+    && Number.isFinite(targetMeshHeight)
+  ){
+    const ratio = targetMeshHeight/sourceMeshHeight;
+    if (Number.isFinite(ratio) && ratio > 1e-4 && ratio < 1e4){
+      // Snap tiny exporter/bounds noise to exactly one. For the same visible
+      // model with a different rig this prevents motion from being scaled for
+      // no visual reason.
+      const value = Math.abs(ratio-1) < 0.01 ? 1 : ratio;
+      return {
+        value,
+        method:"visual-mesh-height",
+        samples:Math.min(
+          sourceRig.visualRest.meshCount || 0,
+          targetRig.visualRest.meshCount || 0
+        ),
+        sourceMeshHeight,
+        targetMeshHeight,
+        rawRatio:ratio
+      };
+    }
+  }
+
+  // Fallback: corresponding mapped body landmarks.
   const bodyRecords = records.filter(r => r.sourceBone && r.targetBone && !r.targetRoot);
   const hipsRecord = bodyRecords.find(r => {
     const s = normalizeBoneName(r.source);
@@ -881,10 +967,16 @@ function robustRetargetScale(records,sourceRig,targetRig,sourceRest){
   }
 
   if (ratios.length >= 4){
-    // Median rejects a wrongly-resolved limb or an accessory bone.
     const value = median(ratios);
     if (value && Number.isFinite(value)){
-      return {value,method:"mapped-landmarks",samples:ratios.length};
+      return {
+        value,
+        method:"mapped-landmarks",
+        samples:ratios.length,
+        sourceMeshHeight,
+        targetMeshHeight,
+        rawRatio:null
+      };
     }
   }
 
@@ -894,7 +986,10 @@ function robustRetargetScale(records,sourceRig,targetRig,sourceRest){
   return {
     value:Number.isFinite(value) && value > EPS ? value : 1,
     method:"weighted-height",
-    samples:0
+    samples:0,
+    sourceMeshHeight,
+    targetMeshHeight,
+    rawRatio:null
   };
 }
 
@@ -2661,6 +2756,9 @@ export async function bakeRetarget(options){
     locationScale,
     locationScaleMethod:scaleInfo.method,
     locationScaleSamples:scaleInfo.samples,
+    sourceMeshHeight:scaleInfo.sourceMeshHeight ?? sourceRig.visualRest?.height ?? null,
+    targetMeshHeight:scaleInfo.targetMeshHeight ?? targetRig.visualRest?.height ?? null,
+    rawMeshScaleRatio:scaleInfo.rawRatio ?? null,
     rootMotionChannels:rootLocationRecords.length,
     rootMotionSources:[...new Set(rootLocationRecords.map(r => r.sourceBone?.name).filter(Boolean))],
     rootRotationChannels:rootRotationRecords.length,
