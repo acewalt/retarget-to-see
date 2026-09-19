@@ -1663,6 +1663,47 @@ export async function bakeRetarget(options){
     }
   }
 
+  const controlMirrorBySource = new Map();
+  for (const r of boneRecords){
+    if (r._control_mirror && r.sourceBone && r.targetBone){
+      controlMirrorBySource.set(r.sourceBone.name,r.targetBone.name);
+    }
+  }
+
+  // IMPORTANT: Source and Target do not share the same object-space body
+  // orientation. With the actual Sit To Stand + juego5 FBXs the rest-body
+  // frames differ by a large rotation. Raw shoulder->hand / hip->foot
+  // vectors therefore look inverted when copied directly.
+  //
+  // Use one STATIC anatomical frame from each REST pose. Do not derive this
+  // from the animated torso, otherwise the frame itself changes while the
+  // character bends and the limb solution can flip.
+  const srcFrameLeft = resolveBone(sourceRig,"LeftArm",sourcePrefix);
+  const srcFrameRight = resolveBone(sourceRig,"RightArm",sourcePrefix);
+  const srcFrameHips = resolveBone(sourceRig,"Hips",sourcePrefix);
+  const srcFrameChest = resolveBone(sourceRig,"Spine2",sourcePrefix)
+    || resolveBone(sourceRig,"Spine1",sourcePrefix)
+    || resolveBone(sourceRig,"Spine",sourcePrefix);
+
+  const tgtFrameLeftName = srcFrameLeft ? sourceToTarget.get(srcFrameLeft.name) : null;
+  const tgtFrameRightName = srcFrameRight ? sourceToTarget.get(srcFrameRight.name) : null;
+  const tgtFrameHipsName = srcFrameHips ? sourceToTarget.get(srcFrameHips.name) : null;
+  const tgtFrameChestName = srcFrameChest ? sourceToTarget.get(srcFrameChest.name) : null;
+
+  const sourceBodyFrame = buildStaticBodyFrame(
+    srcFrameLeft ? sourceRest.get(srcFrameLeft.name)?.worldPosition : null,
+    srcFrameRight ? sourceRest.get(srcFrameRight.name)?.worldPosition : null,
+    srcFrameHips ? sourceRest.get(srcFrameHips.name)?.worldPosition : null,
+    srcFrameChest ? sourceRest.get(srcFrameChest.name)?.worldPosition : null
+  );
+
+  const targetBodyFrame = buildStaticBodyFrame(
+    tgtFrameLeftName ? targetRig.rest.get(tgtFrameLeftName)?.worldPosition : null,
+    tgtFrameRightName ? targetRig.rest.get(tgtFrameRightName)?.worldPosition : null,
+    tgtFrameHipsName ? targetRig.rest.get(tgtFrameHipsName)?.worldPosition : null,
+    tgtFrameChestName ? targetRig.rest.get(tgtFrameChestName)?.worldPosition : null
+  );
+
   const virtualParentByTarget = new Map();
   const virtualRestOffsetByTarget = new Map();
   const virtualSourceDepthByTarget = new Map();
