@@ -406,6 +406,22 @@ export function resolveBone(rig, shortName="", prefix=""){
   if (rig.boneMap.has(n)) return rig.boneMap.get(n);
   if (prefix){
     if (rig.boneMap.has(prefix + n)) return rig.boneMap.get(prefix + n);
+  }
+
+  // FBXLoader sanitizes Object3D.name (notably removing dots used by
+  // Blender's .L/.R convention), but r180 keeps the exact FBX name in
+  // userData.originalName. Prefer that original name whenever possible.
+  const originalExact = rig.bones.filter(
+    b => String(b.userData?.originalName || "") === n
+  );
+  if (originalExact.length === 1) return originalExact[0];
+
+  if (prefix){
+    const wantedOriginal = prefix + n;
+    const originalPrefixed = rig.bones.filter(
+      b => String(b.userData?.originalName || "") === wantedOriginal
+    );
+    if (originalPrefixed.length === 1) return originalPrefixed[0];
 
     // Prefixes entered by the user often lose ":"/"_" after FBXLoader
     // sanitization. Try the compact form as well.
