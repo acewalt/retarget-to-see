@@ -4,7 +4,7 @@
   "target_kind": "generic",
   "namespace_strip": "",
   "auto_bake_ik": false,
-  "_note": "Mixamo → CloudRig FK web preset aligned to the user's known-working Auto-Rig Pro .bmap. Torso chain: Hips→HIP-Spine (rotation), Spine→TORSO-Spine (Set as Root = translation + rotation), Spine1→FK-Spine, Spine2→FK-Chest. Fingers remain mapped where available; the web engine can fall back to deform bones when Blender constraints are absent.",
+  "_note": "Mixamo → CloudRig FK web preset. Root motion is decomposed for plain FBX: the Set-as-Root row (Spine→TORSO-Spine) designates the global Target root, but the web engine extracts horizontal translation + yaw from the nearest Hips/Pelvis ancestor. Hips→HIP-Spine keeps pelvis articulation and receives vertical-only location (Blender Z -> Three Y). Spine1→FK-Spine and Spine2→FK-Chest remain rotational. This mirrors common root-motion extraction practice and avoids tilting the whole character with torso bend.",
   "ik_chains": [
     {
       "limb_kind": "ARM",
@@ -279,8 +279,9 @@
     {
       "source": "Hips",
       "target": "HIP-Spine",
-      "channels": "ROT",
-      "influence": 1
+      "channels": "LOC_ROT",
+      "influence": 1,
+      "axes": "Z"
     },
     {
       "source": "Spine",
