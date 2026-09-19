@@ -7,6 +7,7 @@
  * execute Blender/bpy.
  */
 import * as THREE from "three";
+// REPUBLISH: torso-space arm solver build; behavior intentionally unchanged.
 
 const EPS = 1e-8;
 const FACE_REGIONS = ["jaw","gaze","lids","brows","lips","cheeks","nose","tongue"];
