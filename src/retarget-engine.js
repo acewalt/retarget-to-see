@@ -1805,6 +1805,13 @@ export async function bakeRetarget(options){
   const localState = new Map();
   const worldOut = new Map();
 
+  // Keep elbow/knee bend side stable across frames. A two-bone solution has
+  // two mathematically valid bend positions. Choosing by Source coordinates
+  // can flip one mirrored arm on rigs with different local axes. We instead
+  // preserve the Target's already-valid FK bend side and then keep temporal
+  // continuity from frame to frame.
+  const previousLimbBend = new Map();
+
   function rebuildWorldOut(){
     worldOut.clear();
     for (const bone of sortedBones){
@@ -2148,15 +2155,19 @@ export async function bakeRetarget(options){
 
       const candidate1 = base.clone().add(perp.clone().multiplyScalar(h));
       const candidate2 = base.clone().add(perp.clone().multiplyScalar(-h));
-      const sourceMidReference = A.clone().add(
-        srcAB.clone().multiplyScalar(
-          chain.targetUpperLen/Math.max(chain.sourceUpperLen,EPS)
-        )
-      );
-      const desiredB = candidate1.distanceToSquared(sourceMidReference)
-        <= candidate2.distanceToSquared(sourceMidReference)
+
+      // Preserve the bend side that the Target already had after the normal
+      // FK pass. This is safer than comparing against a Source-space elbow
+      // reference because left/right bone rolls differ between Mixamo and
+      // CloudRig. After frame 0, keep continuity with the previous solved
+      // elbow/knee so the limb cannot suddenly mirror to the other solution.
+      const bendKey = `${chain.kind || "LIMB"}:${chain.side}`;
+      const bendReference = previousLimbBend.get(bendKey) || currentB;
+      const desiredB = candidate1.distanceToSquared(bendReference)
+        <= candidate2.distanceToSquared(bendReference)
         ? candidate1
         : candidate2;
+      previousLimbBend.set(bendKey,desiredB.clone());
 
       // Swing the target upper arm so the elbow reaches desiredB while
       // retaining the existing FK twist as much as possible.
@@ -2347,6 +2358,7 @@ export async function bakeRetarget(options){
       targetFore:c.targetForeLen,
       reachScale:c.reachScale
     })),
+    limbBendSelection:"target-fk-side-temporal",
     footEndEffectorCorrection:Boolean(correctFeet),
     footEndEffectorChains:footCorrectionChains.map(c => ({
       side:c.side,
