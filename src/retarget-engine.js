@@ -1450,6 +1450,7 @@ export async function bakeRetarget(options){
     fps=30,autoScale=true,useCurrentSourcePoseAsRest=false,
     restPosePreset=null,includeRestLocationScale=false,
     useWorldLocation=false,headSource="",headTarget="",
+    correctHands=true,
     faceSettings={global:1,perRegion:false,regions:{}},
     onProgress
   } = options || {};
@@ -1573,6 +1574,55 @@ export async function bakeRetarget(options){
       - (virtualSourceDepthByTarget.get(b) ?? 0)
   );
 
+  // Pure FK preserves rotations, but different humanoids can have very
+  // different upper-arm/forearm proportions. That makes the wrist drift
+  // visibly even when the joint rotations are technically correct. Build a
+  // lightweight two-bone end-effector correction from Source hand position.
+  const armCorrectionChains = [];
+  if (correctHands){
+    for (const side of ["Left","Right"]){
+      const sUpper = resolveBone(sourceRig,`${side}Arm`,sourcePrefix);
+      const sMid = resolveBone(sourceRig,`${side}ForeArm`,sourcePrefix);
+      const sEnd = resolveBone(sourceRig,`${side}Hand`,sourcePrefix);
+      if (!sUpper || !sMid || !sEnd) continue;
+
+      const tUpperName = sourceToTarget.get(sUpper.name);
+      const tMidName = sourceToTarget.get(sMid.name);
+      const tEndName = sourceToTarget.get(sEnd.name);
+      if (!tUpperName || !tMidName || !tEndName) continue;
+
+      const sUpperRest = sourceRest.get(sUpper.name);
+      const sMidRest = sourceRest.get(sMid.name);
+      const sEndRest = sourceRest.get(sEnd.name);
+      const tUpperRest = targetRig.rest.get(tUpperName);
+      const tMidRest = targetRig.rest.get(tMidName);
+      const tEndRest = targetRig.rest.get(tEndName);
+      if (!sUpperRest || !sMidRest || !sEndRest
+        || !tUpperRest || !tMidRest || !tEndRest) continue;
+
+      const sourceUpperLen = sUpperRest.worldPosition.distanceTo(sMidRest.worldPosition);
+      const sourceForeLen = sMidRest.worldPosition.distanceTo(sEndRest.worldPosition);
+      const targetUpperLen = tUpperRest.worldPosition.distanceTo(tMidRest.worldPosition);
+      const targetForeLen = tMidRest.worldPosition.distanceTo(tEndRest.worldPosition);
+      const sourceReach = sourceUpperLen + sourceForeLen;
+      const targetReach = targetUpperLen + targetForeLen;
+      if (sourceReach < EPS || targetReach < EPS) continue;
+
+      armCorrectionChains.push({
+        side,
+        sUpper,sMid,sEnd,
+        tUpperName,tMidName,tEndName,
+        sourceUpperLen,sourceForeLen,
+        targetUpperLen,targetForeLen,
+        reachScale:targetReach/sourceReach
+      });
+
+      // The correction writes explicit elbow/wrist positions.
+      locationTargets.add(tMidName);
+      locationTargets.add(tEndName);
+    }
+  }
+
   const sortedBones = [...targetRig.bones].sort((a,b) =>
     targetRig.rest.get(a.name).depth - targetRig.rest.get(b.name).depth
   );
@@ -1614,6 +1664,52 @@ export async function bakeRetarget(options){
 
   const localState = new Map();
   const worldOut = new Map();
+
+  function rebuildWorldOut(){
+    worldOut.clear();
+    for (const bone of sortedBones){
+      const rest = targetRig.rest.get(bone.name);
+      const state = localState.get(bone.name);
+      if (!rest || !state) continue;
+      const parentWorld = parentWorldForBone(bone,worldOut,rest);
+      worldOut.set(
+        bone.name,
+        buildWorldFromLocal(
+          parentWorld,
+          state.position,
+          state.quaternion,
+          state.scale
+        )
+      );
+    }
+  }
+
+  function worldPositionOf(name){
+    const m = worldOut.get(name);
+    return m ? new THREE.Vector3().setFromMatrixPosition(m) : null;
+  }
+
+  function worldQuaternionOf(name){
+    const m = worldOut.get(name);
+    if (!m) return null;
+    const q = new THREE.Quaternion();
+    m.decompose(new THREE.Vector3(),q,new THREE.Vector3());
+    return q;
+  }
+
+  function setBoneWorldQuaternion(name,desiredWorldQ){
+    const bone = targetRig.boneMap.get(name);
+    const rest = targetRig.rest.get(name);
+    const state = localState.get(name);
+    if (!bone || !rest || !state) return false;
+    const parentWorld = parentWorldForBone(bone,worldOut,rest);
+    const parentQ = new THREE.Quaternion();
+    parentWorld.decompose(new THREE.Vector3(),parentQ,new THREE.Vector3());
+    state.quaternion.copy(
+      parentQ.invert().multiply(desiredWorldQ).normalize()
+    );
+    return true;
+  }
 
   for (let frame=0;frame<frameCount;frame++){
     const t = times[frame];
@@ -1839,6 +1935,161 @@ export async function bakeRetarget(options){
       );
     }
 
+    // PASS 1C: hand end-effector correction.
+    // Match the Source wrist position normalized by total arm reach, then
+    // solve a two-bone target elbow using the Source bend plane. This keeps
+    // the Target's own segment lengths while preventing large wrist drift
+    // caused by different arm proportions.
+    for (const chain of armCorrectionChains){
+      const srcA = new THREE.Vector3().setFromMatrixPosition(chain.sUpper.matrixWorld);
+      const srcB = new THREE.Vector3().setFromMatrixPosition(chain.sMid.matrixWorld);
+      const srcC = new THREE.Vector3().setFromMatrixPosition(chain.sEnd.matrixWorld);
+
+      let srcAC = srcC.clone().sub(srcA);
+      let srcAB = srcB.clone().sub(srcA);
+      if (rootDeltaInv){
+        srcAC.applyQuaternion(rootDeltaInv);
+        srcAB.applyQuaternion(rootDeltaInv);
+      }
+
+      const A = worldPositionOf(chain.tUpperName);
+      const currentB = worldPositionOf(chain.tMidName);
+      const currentC = worldPositionOf(chain.tEndName);
+      const originalHandQ = worldQuaternionOf(chain.tEndName);
+      if (!A || !currentB || !currentC || !originalHandQ) continue;
+      if (srcAC.lengthSq() < EPS || srcAB.lengthSq() < EPS) continue;
+
+      let desiredC = A.clone().add(srcAC.multiplyScalar(chain.reachScale));
+      let AC = desiredC.clone().sub(A);
+      let d = AC.length();
+      if (d < EPS) continue;
+
+      const minReach = Math.abs(chain.targetUpperLen-chain.targetForeLen) + 1e-5;
+      const maxReach = chain.targetUpperLen+chain.targetForeLen - 1e-5;
+      const clampedD = THREE.MathUtils.clamp(d,minReach,maxReach);
+      if (Math.abs(clampedD-d) > 1e-7){
+        desiredC = A.clone().add(AC.normalize().multiplyScalar(clampedD));
+        AC = desiredC.clone().sub(A);
+        d = clampedD;
+      }
+
+      const dir = AC.clone().normalize();
+      const a = (
+        chain.targetUpperLen*chain.targetUpperLen
+        - chain.targetForeLen*chain.targetForeLen
+        + d*d
+      )/(2*d);
+      const hSq = Math.max(
+        0,
+        chain.targetUpperLen*chain.targetUpperLen - a*a
+      );
+      const h = Math.sqrt(hSq);
+      const base = A.clone().add(dir.clone().multiplyScalar(a));
+
+      // Source elbow plane, expressed in the static-root frame.
+      const srcBC = srcC.clone().sub(srcB);
+      if (rootDeltaInv) srcBC.applyQuaternion(rootDeltaInv);
+      let planeN = srcAB.clone().cross(srcBC);
+      if (planeN.lengthSq() < EPS){
+        planeN = currentB.clone().sub(A).cross(currentC.clone().sub(currentB));
+      }
+      if (planeN.lengthSq() < EPS){
+        planeN.set(0,0,1);
+      }
+      planeN.normalize();
+
+      let perp = planeN.clone().cross(dir);
+      if (perp.lengthSq() < EPS){
+        perp = new THREE.Vector3(0,1,0).cross(dir);
+      }
+      if (perp.lengthSq() < EPS){
+        perp = new THREE.Vector3(1,0,0).cross(dir);
+      }
+      perp.normalize();
+
+      const candidate1 = base.clone().add(perp.clone().multiplyScalar(h));
+      const candidate2 = base.clone().add(perp.clone().multiplyScalar(-h));
+      const sourceMidReference = A.clone().add(
+        srcAB.clone().multiplyScalar(
+          chain.targetUpperLen/Math.max(chain.sourceUpperLen,EPS)
+        )
+      );
+      const desiredB = candidate1.distanceToSquared(sourceMidReference)
+        <= candidate2.distanceToSquared(sourceMidReference)
+        ? candidate1
+        : candidate2;
+
+      // Swing the target upper arm so the elbow reaches desiredB while
+      // retaining the existing FK twist as much as possible.
+      const upperWorldQ = worldQuaternionOf(chain.tUpperName);
+      const upperPos = worldPositionOf(chain.tUpperName);
+      const midPosBefore = worldPositionOf(chain.tMidName);
+      if (!upperWorldQ || !upperPos || !midPosBefore) continue;
+
+      const curUpperDir = midPosBefore.clone().sub(upperPos);
+      const wantedUpperDir = desiredB.clone().sub(upperPos);
+      if (curUpperDir.lengthSq() > EPS && wantedUpperDir.lengthSq() > EPS){
+        const swing = new THREE.Quaternion().setFromUnitVectors(
+          curUpperDir.normalize(),
+          wantedUpperDir.normalize()
+        );
+        setBoneWorldQuaternion(
+          chain.tUpperName,
+          swing.multiply(upperWorldQ).normalize()
+        );
+        rebuildWorldOut();
+      }
+
+      // Explicitly place the elbow at the solved point.
+      const midBone = targetRig.boneMap.get(chain.tMidName);
+      const midRest = targetRig.rest.get(chain.tMidName);
+      const midState = localState.get(chain.tMidName);
+      if (!midBone || !midRest || !midState) continue;
+      let midParentWorld = parentWorldForBone(midBone,worldOut,midRest);
+      midState.position.copy(vectorToLocal(midParentWorld,desiredB));
+      rebuildWorldOut();
+
+      // Swing forearm so the wrist lands on desiredC.
+      const foreWorldQ = worldQuaternionOf(chain.tMidName);
+      const midPos = worldPositionOf(chain.tMidName);
+      const endPosBefore = worldPositionOf(chain.tEndName);
+      if (foreWorldQ && midPos && endPosBefore){
+        const curForeDir = endPosBefore.clone().sub(midPos);
+        const wantedForeDir = desiredC.clone().sub(midPos);
+        if (curForeDir.lengthSq() > EPS && wantedForeDir.lengthSq() > EPS){
+          const swing = new THREE.Quaternion().setFromUnitVectors(
+            curForeDir.normalize(),
+            wantedForeDir.normalize()
+          );
+          setBoneWorldQuaternion(
+            chain.tMidName,
+            swing.multiply(foreWorldQ).normalize()
+          );
+          rebuildWorldOut();
+        }
+      }
+
+      // Lock the wrist position but preserve the hand orientation already
+      // produced by the FK retarget.
+      const endBone = targetRig.boneMap.get(chain.tEndName);
+      const endRest = targetRig.rest.get(chain.tEndName);
+      const endState = localState.get(chain.tEndName);
+      if (!endBone || !endRest || !endState) continue;
+      const endParentWorld = parentWorldForBone(endBone,worldOut,endRest);
+      endState.position.copy(vectorToLocal(endParentWorld,desiredC));
+
+      const endParentQ = new THREE.Quaternion();
+      endParentWorld.decompose(
+        new THREE.Vector3(),
+        endParentQ,
+        new THREE.Vector3()
+      );
+      endState.quaternion.copy(
+        endParentQ.invert().multiply(originalHandQ).normalize()
+      );
+      rebuildWorldOut();
+    }
+
     // PASS 2: HEAD_LOCAL rows. These intentionally bypass the target's
     // semantic parent chain and land the control at a head-relative point.
     if (srcHeadBone && tgtHeadBone && srcHeadRestInv && tgtHeadRestInv){
@@ -1953,6 +2204,15 @@ export async function bakeRetarget(options){
     ),
     virtualChainStabilizedTargets:virtualTargets,
     virtualChainStabilizedCount:virtualTargets.length,
+    handEndEffectorCorrection:Boolean(correctHands),
+    handEndEffectorChains:armCorrectionChains.map(c => ({
+      side:c.side,
+      sourceUpper:c.sourceUpperLen,
+      sourceFore:c.sourceForeLen,
+      targetUpper:c.targetUpperLen,
+      targetFore:c.targetForeLen,
+      reachScale:c.reachScale
+    })),
     splitRootMappings:[...new Set(records
       .filter(r => r._rotation_only || r._location_only)
       .map(r => r.pairIndex))]
