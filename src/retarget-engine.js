@@ -1525,7 +1525,7 @@ export async function bakeRetarget(options){
     fps=30,autoScale=true,useCurrentSourcePoseAsRest=false,
     restPosePreset=null,includeRestLocationScale=false,
     useWorldLocation=false,headSource="",headTarget="",
-    correctHands=true,
+    correctHands=true,correctFeet=true,
     faceSettings={global:1,perRegion:false,regions:{}},
     onProgress
   } = options || {};
@@ -1715,6 +1715,53 @@ export async function bakeRetarget(options){
       });
     }
   }
+
+  const footCorrectionChains = [];
+  if (correctFeet){
+    for (const side of ["Left","Right"]){
+      const sUpper = resolveBone(sourceRig,`${side}UpLeg`,sourcePrefix);
+      const sMid = resolveBone(sourceRig,`${side}Leg`,sourcePrefix);
+      const sEnd = resolveBone(sourceRig,`${side}Foot`,sourcePrefix);
+      if (!sUpper || !sMid || !sEnd) continue;
+
+      const tUpperName = sourceToTarget.get(sUpper.name);
+      const tMidName = sourceToTarget.get(sMid.name);
+      const tEndName = sourceToTarget.get(sEnd.name);
+      if (!tUpperName || !tMidName || !tEndName) continue;
+
+      const sUpperRest = sourceRest.get(sUpper.name);
+      const sMidRest = sourceRest.get(sMid.name);
+      const sEndRest = sourceRest.get(sEnd.name);
+      const tUpperRest = targetRig.rest.get(tUpperName);
+      const tMidRest = targetRig.rest.get(tMidName);
+      const tEndRest = targetRig.rest.get(tEndName);
+      if (!sUpperRest || !sMidRest || !sEndRest
+        || !tUpperRest || !tMidRest || !tEndRest) continue;
+
+      const sourceUpperLen = sUpperRest.worldPosition.distanceTo(sMidRest.worldPosition);
+      const sourceForeLen = sMidRest.worldPosition.distanceTo(sEndRest.worldPosition);
+      const targetUpperLen = tUpperRest.worldPosition.distanceTo(tMidRest.worldPosition);
+      const targetForeLen = tMidRest.worldPosition.distanceTo(tEndRest.worldPosition);
+      const sourceReach = sourceUpperLen + sourceForeLen;
+      const targetReach = targetUpperLen + targetForeLen;
+      if (sourceReach < EPS || targetReach < EPS) continue;
+
+      footCorrectionChains.push({
+        kind:"LEG",
+        side,
+        sUpper,sMid,sEnd,
+        tUpperName,tMidName,tEndName,
+        sourceUpperLen,sourceForeLen,
+        targetUpperLen,targetForeLen,
+        reachScale:targetReach/sourceReach
+      });
+    }
+  }
+
+  const limbCorrectionChains = [
+    ...armCorrectionChains.map(chain => ({...chain,kind:"ARM"})),
+    ...footCorrectionChains
+  ];
 
   const sortedBones = [...targetRig.bones].sort((a,b) =>
     targetRig.rest.get(a.name).depth - targetRig.rest.get(b.name).depth
@@ -2028,12 +2075,11 @@ export async function bakeRetarget(options){
       );
     }
 
-    // PASS 1C: hand end-effector correction.
-    // Match the Source wrist position normalized by total arm reach, then
-    // solve a two-bone target elbow using the Source bend plane. This keeps
-    // the Target's own segment lengths while preventing large wrist drift
-    // caused by different arm proportions.
-    for (const chain of armCorrectionChains){
+    // PASS 1C: two-bone end-effector correction for arms and legs.
+    // Match Source wrist/ankle position normalized by total limb reach, then
+    // solve the Target elbow/knee using the Source bend plane. Only rotations
+    // are changed: CloudRig DEF local translations remain untouched.
+    for (const chain of limbCorrectionChains){
       const srcA = new THREE.Vector3().setFromMatrixPosition(chain.sUpper.matrixWorld);
       const srcB = new THREE.Vector3().setFromMatrixPosition(chain.sMid.matrixWorld);
       const srcC = new THREE.Vector3().setFromMatrixPosition(chain.sEnd.matrixWorld);
@@ -2299,6 +2345,15 @@ export async function bakeRetarget(options){
       sourceFore:c.sourceForeLen,
       targetUpper:c.targetUpperLen,
       targetFore:c.targetForeLen,
+      reachScale:c.reachScale
+    })),
+    footEndEffectorCorrection:Boolean(correctFeet),
+    footEndEffectorChains:footCorrectionChains.map(c => ({
+      side:c.side,
+      sourceThigh:c.sourceUpperLen,
+      sourceShin:c.sourceForeLen,
+      targetThigh:c.targetUpperLen,
+      targetShin:c.targetForeLen,
       reachScale:c.reachScale
     })),
     splitRootMappings:[...new Set(records
