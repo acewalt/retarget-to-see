@@ -109,6 +109,98 @@ const state = {
   faceRegions:Object.fromEntries(FACE_REGIONS.map(r => [r,1]))
 };
 
+function compactBoneName(name=""){
+  return String(name).toLowerCase().replace(/[^a-z0-9]/g,"");
+}
+
+function findRigBone(rig,...names){
+  if (!rig) return null;
+  for (const name of names){
+    const exact = rig.boneMap?.get(name);
+    if (exact) return exact;
+  }
+  const wanted = new Set(names.map(compactBoneName));
+  return rig.bones.find(b => wanted.has(compactBoneName(b.name))) || null;
+}
+
+const CLOUDRIG_DISPLAY_EDGES = [
+  ["DEF-Hips","DEF-Spine"],
+  ["DEF-Spine","DEF-Chest"],
+  ["DEF-Chest","DEF-Neck"],
+  ["DEF-Neck","DEF-Head"],
+
+  ["DEF-Chest","DEF-ShoulderL"],
+  ["DEF-ShoulderL","DEF-UpperArm_1L"],
+  ["DEF-UpperArm_1L","DEF-UpperArm_2L"],
+  ["DEF-UpperArm_2L","DEF-Forearm_1L"],
+  ["DEF-Forearm_1L","DEF-Forearm_2L"],
+  ["DEF-Forearm_2L","DEF-HandL"],
+
+  ["DEF-Chest","DEF-ShoulderR"],
+  ["DEF-ShoulderR","DEF-UpperArm_1R"],
+  ["DEF-UpperArm_1R","DEF-UpperArm_2R"],
+  ["DEF-UpperArm_2R","DEF-Forearm_1R"],
+  ["DEF-Forearm_1R","DEF-Forearm_2R"],
+  ["DEF-Forearm_2R","DEF-HandR"],
+
+  ["DEF-Hips","DEF-Thigh_1L"],
+  ["DEF-Thigh_1L","DEF-Thigh_2L"],
+  ["DEF-Thigh_2L","DEF-Knee_1L"],
+  ["DEF-Knee_1L","DEF-Knee_2L"],
+  ["DEF-Knee_2L","DEF-FootL"],
+  ["DEF-FootL","DEF-ToesL"],
+
+  ["DEF-Hips","DEF-Thigh_1R"],
+  ["DEF-Thigh_1R","DEF-Thigh_2R"],
+  ["DEF-Thigh_2R","DEF-Knee_1R"],
+  ["DEF-Knee_1R","DEF-Knee_2R"],
+  ["DEF-Knee_2R","DEF-FootR"],
+  ["DEF-FootR","DEF-ToesR"]
+];
+
+function createCloudRigDeformHelper(rig){
+  const resolvedEdges = CLOUDRIG_DISPLAY_EDGES
+    .map(([a,b]) => [findRigBone(rig,a),findRigBone(rig,b)])
+    .filter(([a,b]) => a && b);
+
+  const geometry = new THREE.BufferGeometry();
+  const positions = new Float32Array(resolvedEdges.length * 2 * 3);
+  geometry.setAttribute("position",new THREE.BufferAttribute(positions,3));
+
+  const material = new THREE.LineBasicMaterial({
+    color:0x39d7ff,
+    transparent:true,
+    opacity:.88,
+    depthTest:false
+  });
+
+  const lines = new THREE.LineSegments(geometry,material);
+  lines.frustumCulled = false;
+  lines.userData.resolvedEdges = resolvedEdges;
+  lines.userData.updateFromRig = () => {
+    rig.root.updateMatrixWorld(true);
+    const attr = geometry.getAttribute("position");
+    const pA = new THREE.Vector3();
+    const pB = new THREE.Vector3();
+    let i = 0;
+    for (const [a,b] of resolvedEdges){
+      pA.setFromMatrixPosition(a.matrixWorld);
+      pB.setFromMatrixPosition(b.matrixWorld);
+      attr.setXYZ(i++,pA.x,pA.y,pA.z);
+      attr.setXYZ(i++,pB.x,pB.y,pB.z);
+    }
+    attr.needsUpdate = true;
+    geometry.computeBoundingSphere();
+  };
+  lines.userData.updateFromRig();
+  return lines;
+}
+
+function cloudRigDisplayBones(rig){
+  const names = new Set(CLOUDRIG_DISPLAY_EDGES.flat().map(compactBoneName));
+  return rig.bones.filter(b => names.has(compactBoneName(b.name)));
+}
+
 class RigViewport{
   constructor(container){
     this.container = container;
@@ -165,10 +257,21 @@ class RigViewport{
     this.root = rig?.root || null;
     if (this.root){
       this.scene.add(this.root);
-      this.helper = new THREE.SkeletonHelper(this.root);
-      this.helper.material.transparent = true;
-      this.helper.material.opacity = .72;
-      this.helper.material.depthTest = false;
+
+      // CloudRig FBX contains hundreds of control/STR/IK bones whose Blender
+      // constraints are not present in the exported file. Three.js
+      // SkeletonHelper draws every one of them, which creates the huge
+      // detached "spider" lines seen around an otherwise correct retarget.
+      // For CloudRig, display only the anatomical DEF chains we actually bake.
+      if (rig.cloudRigProfile){
+        this.helper = createCloudRigDeformHelper(rig);
+      } else {
+        this.helper = new THREE.SkeletonHelper(this.root);
+        this.helper.material.transparent = true;
+        this.helper.material.opacity = .72;
+        this.helper.material.depthTest = false;
+      }
+
       this.scene.add(this.helper);
       this.frame();
     }
@@ -179,7 +282,11 @@ class RigViewport{
     const box = new THREE.Box3();
     let initialized = false;
     const p = new THREE.Vector3();
-    for (const bone of this.rig.bones){
+    const frameBones = this.rig.cloudRigProfile
+      ? cloudRigDisplayBones(this.rig)
+      : this.rig.bones;
+
+    for (const bone of frameBones){
       p.setFromMatrixPosition(bone.matrixWorld);
       if (!initialized){
         box.min.copy(p);box.max.copy(p);initialized=true;
@@ -243,7 +350,11 @@ class RigViewport{
   }
   render(){
     this.controls.update();
-    if (this.helper) this.helper.updateMatrixWorld(true);
+    if (this.helper?.userData?.updateFromRig){
+      this.helper.userData.updateFromRig();
+    } else if (this.helper){
+      this.helper.updateMatrixWorld(true);
+    }
     this.renderer.render(this.scene,this.camera);
   }
 }
