@@ -20,7 +20,7 @@ import {
   captureRestPosePreset,
   captureCurrentRigReference,
   serializeMap
-} from "./retarget-engine.js?v=20260919-original-bind2";
+} from "./retarget-engine.js?v=20260919-worldbind1";
 
 const $ = id => document.getElementById(id);
 
@@ -760,6 +760,70 @@ function remapSkinIndicesForCleanSkeleton(geometry,oldSkeleton,oldToNew){
   return cloned;
 }
 
+function bakeCurrentSkinnedGeometryToWorld(
+  srcMesh,
+  oldSkeleton,
+  oldToNew
+){
+  srcMesh.updateMatrixWorld(true);
+  srcMesh.skeleton?.update?.();
+
+  const source = srcMesh.geometry;
+  const position = source?.getAttribute?.("position");
+  if (!source || !position){
+    throw new Error(`Mesh ${srcMesh.name || "(sin nombre)"} sin posiciones.`);
+  }
+
+  // Clone all non-positional attributes (UVs, colors, weights, indices, etc.)
+  // and remap skin indices to the new compact deform-only skeleton.
+  const baked = remapSkinIndicesForCleanSkeleton(
+    source,
+    oldSkeleton,
+    oldToNew
+  );
+
+  const bakedPositions = new Float32Array(position.count * 3);
+  const v = new THREE.Vector3();
+
+  for (let i=0;i<position.count;i++){
+    v.fromBufferAttribute(position,i);
+
+    // Evaluate the CURRENT visible skin in mesh-local space using the FBX's
+    // original skeleton/bind matrices. This is the last place where the
+    // original CloudRig bind setup is needed.
+    srcMesh.applyBoneTransform(i,v);
+
+    // Then bake into world/meters. The clean export mesh will be identity,
+    // so these coordinates become its new bind-space vertices directly.
+    v.applyMatrix4(srcMesh.matrixWorld);
+
+    bakedPositions[i*3] = v.x;
+    bakedPositions[i*3+1] = v.y;
+    bakedPositions[i*3+2] = v.z;
+  }
+
+  baked.setAttribute(
+    "position",
+    new THREE.Float32BufferAttribute(bakedPositions,3)
+  );
+
+  // Old normals/tangents/morph deltas belong to the old mesh/bind frame.
+  // Recompute normals for the baked geometry and drop stale tangents/morphs.
+  if (baked.getAttribute("normal")){
+    baked.deleteAttribute("normal");
+  }
+  if (baked.getAttribute("tangent")){
+    baked.deleteAttribute("tangent");
+  }
+  baked.morphAttributes = {};
+  baked.morphTargetsRelative = false;
+  baked.computeVertexNormals?.();
+  baked.computeBoundingBox?.();
+  baked.computeBoundingSphere?.();
+
+  return baked;
+}
+
 function decomposeRelativeWorld(childWorld,parentWorld){
   const local = parentWorld
     ? parentWorld.clone().invert().multiply(childWorld)
@@ -880,80 +944,52 @@ function buildCleanDeformExport(targetRig,clip){
 
     exportRoot.updateMatrixWorld(true);
 
-    const geometry = remapSkinIndicesForCleanSkeleton(
-      srcMesh.geometry,
+    // Bake the CURRENT visible Target skin to a brand-new world-space bind
+    // mesh. This severs all dependency on CloudRig's original armature
+    // object scale, FBX bindMatrix and inverse-bind matrices.
+    const geometry = bakeCurrentSkinnedGeometryToWorld(
+      srcMesh,
       oldSkeleton,
       oldToNew
     );
+
     const material = makeSafeExportMaterialForMesh(srcMesh);
     const cleanMesh = new THREE.SkinnedMesh(geometry,material);
     cleanMesh.name = srcMesh.name || `Mesh_${meshIndex}`;
 
-    // Preserve geometry's original mesh-local coordinate frame in world
-    // meters, but detach it from CloudRig's object/control hierarchy.
-    srcMesh.updateMatrixWorld(true);
-    const meshWorld = srcMesh.matrixWorld.clone();
-    meshWorld.decompose(
-      cleanMesh.position,
-      cleanMesh.quaternion,
-      cleanMesh.scale
-    );
-    cleanMesh.quaternion.normalize();
+    // Geometry is already in exportRoot/world meters.
+    cleanMesh.position.set(0,0,0);
+    cleanMesh.quaternion.identity();
+    cleanMesh.scale.set(1,1,1);
     cleanMesh.updateMatrix();
-
-    if (srcMesh.morphTargetDictionary){
-      cleanMesh.morphTargetDictionary = {
-        ...srcMesh.morphTargetDictionary
-      };
-      cleanMesh.morphTargetInfluences = Array.from(
-        srcMesh.morphTargetInfluences || []
-      );
-    }
 
     exportRoot.add(cleanMesh);
     exportRoot.updateMatrixWorld(true);
 
-    // CRITICAL: keep the FBX skin binding exactly. FBXLoader may provide
-    // inverse bind matrices that are NOT equal to inverse(current bone world)
-    // because the skin was authored under an armature/object transform.
-    // Recomputing them with calculateInverses() was the cause of the giant
-    // spikes in Blender.
-    const originalInverses = orderedOldIndices.map(oldIndex => {
-      const inv = oldSkeleton.boneInverses?.[oldIndex];
-      if (inv?.isMatrix4) return inv.clone();
+    // The clean bones were created directly in the same world/meters space
+    // as the baked vertices. Therefore a completely NEW bind is now valid:
+    // bindMatrix = identity and inverseBind = inverse(clean bone world).
+    exportRoot.updateMatrixWorld(true);
+    const cleanSkeleton = new THREE.Skeleton(cleanBones);
+    cleanSkeleton.calculateInverses();
 
-      // Last-resort fallback only when the FBX did not provide one.
-      const bone = oldSkeleton.bones[oldIndex];
-      return bone.matrixWorld.clone().invert();
-    });
-
-    const cleanSkeleton = new THREE.Skeleton(
-      cleanBones,
-      originalInverses
-    );
-
-    cleanMesh.bindMode = srcMesh.bindMode;
-    cleanMesh.bind(
-      cleanSkeleton,
-      srcMesh.bindMatrix?.clone?.() || cleanMesh.matrixWorld.clone()
-    );
-    if (srcMesh.bindMatrixInverse?.isMatrix4){
-      cleanMesh.bindMatrixInverse.copy(srcMesh.bindMatrixInverse);
-    }
+    const identityBind = new THREE.Matrix4();
+    cleanMesh.bindMode = "attached";
+    cleanMesh.bind(cleanSkeleton,identityBind);
     cleanMesh.normalizeSkinWeights?.();
 
-    // Validate the reconstructed skin in its REST state before baking/export.
-    // If source and clean skins differ wildly here, do not create another
-    // knowingly broken GLB.
-    srcMesh.skeleton?.update?.();
+    exportRoot.updateMatrixWorld(true);
     cleanSkeleton.update();
-    srcMesh.computeBoundingBox?.();
     cleanMesh.computeBoundingBox?.();
+
+    // Compare against the source mesh's actually-rendered skin, not its raw
+    // geometry bounds.
+    srcMesh.skeleton?.update?.();
+    srcMesh.computeBoundingBox?.();
 
     const srcWorldBox = srcMesh.boundingBox?.clone?.()
       ?.applyMatrix4(srcMesh.matrixWorld);
-    const cleanWorldBox = cleanMesh.boundingBox?.clone?.()
-      ?.applyMatrix4(cleanMesh.matrixWorld);
+    const cleanWorldBox = cleanMesh.boundingBox?.clone?.();
 
     if (
       srcWorldBox && cleanWorldBox
@@ -961,21 +997,20 @@ function buildCleanDeformExport(targetRig,clip){
     ){
       const srcSize = srcWorldBox.getSize(new THREE.Vector3());
       const cleanSize = cleanWorldBox.getSize(new THREE.Vector3());
+      const srcCenter = srcWorldBox.getCenter(new THREE.Vector3());
+      const cleanCenter = cleanWorldBox.getCenter(new THREE.Vector3());
 
-      const ratios = [
-        cleanSize.x/Math.max(srcSize.x,1e-8),
-        cleanSize.y/Math.max(srcSize.y,1e-8),
-        cleanSize.z/Math.max(srcSize.z,1e-8)
-      ].filter(Number.isFinite);
-
-      const worst = ratios.reduce(
-        (m,r) => Math.max(m,Math.abs(r-1)),
-        0
+      const sizeError = Math.max(
+        Math.abs(cleanSize.x-srcSize.x),
+        Math.abs(cleanSize.y-srcSize.y),
+        Math.abs(cleanSize.z-srcSize.z)
       );
+      const centerError = cleanCenter.distanceTo(srcCenter);
+      const tolerance = Math.max(srcSize.length()*0.002,0.002);
 
-      if (worst > 0.05){
+      if (sizeError > tolerance || centerError > tolerance){
         throw new Error(
-          `Validación bind falló antes de exportar: Source [${srcSize.x.toFixed(4)}, ${srcSize.y.toFixed(4)}, ${srcSize.z.toFixed(4)}] m vs Clean [${cleanSize.x.toFixed(4)}, ${cleanSize.y.toFixed(4)}, ${cleanSize.z.toFixed(4)}] m.`
+          `Validación clean-bind falló: size Source [${srcSize.x.toFixed(4)}, ${srcSize.y.toFixed(4)}, ${srcSize.z.toFixed(4)}] vs Clean [${cleanSize.x.toFixed(4)}, ${cleanSize.y.toFixed(4)}, ${cleanSize.z.toFixed(4)}], center error=${centerError.toFixed(5)}m.`
         );
       }
     }
@@ -2950,7 +2985,7 @@ async function exportGlb(){
       : "";
 
     const skeletonNote = deformOnlyInfo
-      ? ` Export limpio: ${deformOnlyInfo.totalMeshes} mesh(es), ${deformOnlyInfo.totalBones} deform bone(s); inverse-bind matrices + bindMatrix originales preservados; controles CloudRig excluidos; rest bounds clean=[${deformOnlyInfo.finalSize.x.toFixed(4)}, ${deformOnlyInfo.finalSize.y.toFixed(4)}, ${deformOnlyInfo.finalSize.z.toFixed(4)}] m.`
+      ? ` Export limpio: ${deformOnlyInfo.totalMeshes} mesh(es), ${deformOnlyInfo.totalBones} deform bone(s); geometría skinned horneada a world/meters como nuevo bind mesh; bindMatrix identidad + inverse-bind nuevas; controles CloudRig excluidos; rest bounds clean=[${deformOnlyInfo.finalSize.x.toFixed(4)}, ${deformOnlyInfo.finalSize.y.toFixed(4)}, ${deformOnlyInfo.finalSize.z.toFixed(4)}] m.`
       : " Export directo del skeleton Target.";
 
     setStatus(
