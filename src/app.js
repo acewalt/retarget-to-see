@@ -20,8 +20,8 @@ import {
   captureRestPosePreset,
   captureCurrentRigReference,
   serializeMap
-} from "./retarget-engine.js?v=20260919-deform-controls1";
-import { injectAnimationIntoOriginalFbx } from "./fbx-animation-injector.js?v=20260919-deform-controls1";
+} from "./retarget-engine.js?v=20260919-deform-controls2";
+import { injectAnimationIntoOriginalFbx } from "./fbx-animation-injector.js?v=20260919-deform-controls2";
 
 const $ = id => document.getElementById(id);
 
@@ -3119,20 +3119,35 @@ function prepareExactOriginalNameExport(rig,clip){
   };
 }
 
-function mergeExactTargetClips(previewClip,controlClip){
+function mergeExactTargetClips(previewClip,controlClip,rig){
   if (!previewClip) throw new Error("No existe el clip deformado del viewport.");
 
-  // The imported FBX has no Blender CloudRig constraints. Therefore an
-  // action that animates only FK controls leaves the weighted DEF bones in
-  // rest pose and the mesh does not move. The exact FBX must carry BOTH:
-  //   1) the already verified viewport/deform result (drives the skin), and
-  //   2) the FK/control bake (keeps the visible control layer coherent).
-  // The deform clip wins only if an identical track name exists.
+  // IMPORTANT:
+  // The viewport clip can contain a scene/root-object track such as
+  // "x1.position". That object is a Three.js/FBXLoader container and is NOT
+  // necessarily a Model node in the user's original FBX. Injecting such a
+  // track caused:
+  //   "La Action intenta animar x1 pero ese Model no existe..."
+  //
+  // For the exact FBX we only take deformation tracks whose target is one of
+  // the original weighted bones. Root/global motion comes from the direct
+  // CloudRig control bake (the actual "root" control), never from rig.root.
   const byName = new Map();
+  const weighted = rig?.weightedBoneNames || new Set();
 
   for (const track of previewClip.tracks || []){
+    let parsed = null;
+    try{
+      parsed = THREE.PropertyBinding.parseTrackName(track.name);
+    }catch{
+      parsed = null;
+    }
+    const nodeName = parsed?.nodeName || "";
+    if (!weighted.has(nodeName)) continue;
     byName.set(track.name,track.clone());
   }
+
+  // Controls/FK/root are added from the ORIGINAL_RIG bake.
   for (const track of controlClip?.tracks || []){
     if (!byName.has(track.name)){
       byName.set(track.name,track.clone());
@@ -3327,7 +3342,7 @@ async function exportOriginalTargetRigFbx(){
     // The viewport clip is already the evaluated deformation result that the
     // user sees on the Target mesh. Merge it with the control bake so the same
     // FBX contains animated DEF bones AND the corresponding FK controls.
-    const exactClip = mergeExactTargetClips(previewClip,direct.clip);
+    const exactClip = mergeExactTargetClips(previewClip,direct.clip,rig);
     const coverage = assertExactClipDrivesWeightedBones(rig,exactClip);
 
     resetRigToRest(rig);
@@ -3394,7 +3409,9 @@ async function exportOriginalTargetRigFbx(){
       + " DEF del archivo (" + coverage.animatedWeighted.length
       + "/" + coverage.totalWeighted + " grupos con peso detectados) y "
       + controlTargets.length + " controles FK/root. "
-      + "Esto corrige el fallo anterior donde sólo se animaban FK y la malla quedaba quieta.",
+      + "El track contenedor del viewport (por ejemplo x1.position) se descarta: "
+      + "el movimiento global lo lleva el hueso/control root real del Target. "
+      + "Esto corrige tanto la malla inmóvil como el error «Model x1 no existe».",
       "success"
     );
   }catch(err){
