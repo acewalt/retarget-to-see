@@ -1503,30 +1503,6 @@ function actualPairRecords(pairs,sourceRig,targetRig,sourcePrefix,targetPrefix){
       sourceRest:sourceRig.rest.get(sourceBone.name),
       targetRest:targetRig.rest.get(targetBone.name)
     });
-
-    // CloudRig FK controls are separate from the DEF chain in exported FBX.
-    // Mirror the same Source motion onto the actual requested FK control too.
-    // Example:
-    //   mixamorig1:LeftForeArm -> FK-Forearm.L   (control track)
-    //                              + DEF-Forearm_1.L (mesh track)
-    const directControl = resolveBone(targetRig,raw.target,targetPrefix);
-    if (
-      targetRig.cloudRigProfile
-      && directControl
-      && directControl !== targetBone
-      && /^FK-/i.test(directControl.name)
-    ){
-      out.push({
-        ...raw,
-        pairIndex,
-        sourceBone,
-        targetBone:directControl,
-        targetRoot:false,
-        _control_mirror:true,
-        sourceRest:sourceRig.rest.get(sourceBone.name),
-        targetRest:targetRig.rest.get(directControl.name)
-      });
-    }
   }
   return out;
 }
@@ -1540,39 +1516,6 @@ function pushQuat(values,q){
 }
 function pushVec(values,v){
   values.push(v.x,v.y,v.z);
-}
-
-function buildStaticBodyFrame(leftPos,rightPos,hipsPos,chestPos){
-  if (!leftPos || !rightPos || !hipsPos || !chestPos) return null;
-
-  const lateral = rightPos.clone().sub(leftPos);
-  const up = chestPos.clone().sub(hipsPos);
-  if (lateral.lengthSq() < EPS || up.lengthSq() < EPS) return null;
-
-  lateral.normalize();
-  up.addScaledVector(lateral,-up.dot(lateral));
-  if (up.lengthSq() < EPS) return null;
-  up.normalize();
-
-  const forward = lateral.clone().cross(up);
-  if (forward.lengthSq() < EPS) return null;
-  forward.normalize();
-
-  // Re-orthogonalize so both rigs use an equivalent right-handed frame.
-  up.copy(forward.clone().cross(lateral)).normalize();
-  return {lateral,up,forward};
-}
-
-function mapVectorBetweenBodyFrames(v,sourceFrame,targetFrame){
-  if (!sourceFrame || !targetFrame) return v.clone();
-
-  const x = v.dot(sourceFrame.lateral);
-  const y = v.dot(sourceFrame.up);
-  const z = v.dot(sourceFrame.forward);
-
-  return targetFrame.lateral.clone().multiplyScalar(x)
-    .add(targetFrame.up.clone().multiplyScalar(y))
-    .add(targetFrame.forward.clone().multiplyScalar(z));
 }
 
 export async function bakeRetarget(options){
@@ -1662,47 +1605,6 @@ export async function bakeRetarget(options){
       sourceRecordByName.set(r.sourceBone.name,r);
     }
   }
-
-  const controlMirrorBySource = new Map();
-  for (const r of boneRecords){
-    if (r._control_mirror && r.sourceBone && r.targetBone){
-      controlMirrorBySource.set(r.sourceBone.name,r.targetBone.name);
-    }
-  }
-
-  // IMPORTANT: Source and Target do not share the same object-space body
-  // orientation. With the actual Sit To Stand + juego5 FBXs the rest-body
-  // frames differ by a large rotation. Raw shoulder->hand / hip->foot
-  // vectors therefore look inverted when copied directly.
-  //
-  // Use one STATIC anatomical frame from each REST pose. Do not derive this
-  // from the animated torso, otherwise the frame itself changes while the
-  // character bends and the limb solution can flip.
-  const srcFrameLeft = resolveBone(sourceRig,"LeftArm",sourcePrefix);
-  const srcFrameRight = resolveBone(sourceRig,"RightArm",sourcePrefix);
-  const srcFrameHips = resolveBone(sourceRig,"Hips",sourcePrefix);
-  const srcFrameChest = resolveBone(sourceRig,"Spine2",sourcePrefix)
-    || resolveBone(sourceRig,"Spine1",sourcePrefix)
-    || resolveBone(sourceRig,"Spine",sourcePrefix);
-
-  const tgtFrameLeftName = srcFrameLeft ? sourceToTarget.get(srcFrameLeft.name) : null;
-  const tgtFrameRightName = srcFrameRight ? sourceToTarget.get(srcFrameRight.name) : null;
-  const tgtFrameHipsName = srcFrameHips ? sourceToTarget.get(srcFrameHips.name) : null;
-  const tgtFrameChestName = srcFrameChest ? sourceToTarget.get(srcFrameChest.name) : null;
-
-  const sourceBodyFrame = buildStaticBodyFrame(
-    srcFrameLeft ? sourceRest.get(srcFrameLeft.name)?.worldPosition : null,
-    srcFrameRight ? sourceRest.get(srcFrameRight.name)?.worldPosition : null,
-    srcFrameHips ? sourceRest.get(srcFrameHips.name)?.worldPosition : null,
-    srcFrameChest ? sourceRest.get(srcFrameChest.name)?.worldPosition : null
-  );
-
-  const targetBodyFrame = buildStaticBodyFrame(
-    tgtFrameLeftName ? targetRig.rest.get(tgtFrameLeftName)?.worldPosition : null,
-    tgtFrameRightName ? targetRig.rest.get(tgtFrameRightName)?.worldPosition : null,
-    tgtFrameHipsName ? targetRig.rest.get(tgtFrameHipsName)?.worldPosition : null,
-    tgtFrameChestName ? targetRig.rest.get(tgtFrameChestName)?.worldPosition : null
-  );
 
   const virtualParentByTarget = new Map();
   const virtualRestOffsetByTarget = new Map();
@@ -1807,9 +1709,6 @@ export async function bakeRetarget(options){
         side,
         sUpper,sMid,sEnd,
         tUpperName,tMidName,tEndName,
-        tUpperControlName:controlMirrorBySource.get(sUpper.name) || null,
-        tMidControlName:controlMirrorBySource.get(sMid.name) || null,
-        tEndControlName:controlMirrorBySource.get(sEnd.name) || null,
         sourceUpperLen,sourceForeLen,
         targetUpperLen,targetForeLen,
         reachScale:targetReach/sourceReach
@@ -1852,9 +1751,6 @@ export async function bakeRetarget(options){
         side,
         sUpper,sMid,sEnd,
         tUpperName,tMidName,tEndName,
-        tUpperControlName:controlMirrorBySource.get(sUpper.name) || null,
-        tMidControlName:controlMirrorBySource.get(sMid.name) || null,
-        tEndControlName:controlMirrorBySource.get(sEnd.name) || null,
         sourceUpperLen,sourceForeLen,
         targetUpperLen,targetForeLen,
         reachScale:targetReach/sourceReach
@@ -2194,10 +2090,6 @@ export async function bakeRetarget(options){
         srcAC.applyQuaternion(rootDeltaInv);
         srcAB.applyQuaternion(rootDeltaInv);
       }
-      if (sourceBodyFrame && targetBodyFrame){
-        srcAC = mapVectorBetweenBodyFrames(srcAC,sourceBodyFrame,targetBodyFrame);
-        srcAB = mapVectorBetweenBodyFrames(srcAB,sourceBodyFrame,targetBodyFrame);
-      }
 
       const A = worldPositionOf(chain.tUpperName);
       const currentB = worldPositionOf(chain.tMidName);
@@ -2233,13 +2125,9 @@ export async function bakeRetarget(options){
       const h = Math.sqrt(hSq);
       const base = A.clone().add(dir.clone().multiplyScalar(a));
 
-      // Source elbow/knee plane, expressed in the Target's static REST
-      // body frame. This is the key difference from raw world-vector copying.
-      let srcBC = srcC.clone().sub(srcB);
+      // Source elbow plane, expressed in the static-root frame.
+      const srcBC = srcC.clone().sub(srcB);
       if (rootDeltaInv) srcBC.applyQuaternion(rootDeltaInv);
-      if (sourceBodyFrame && targetBodyFrame){
-        srcBC = mapVectorBetweenBodyFrames(srcBC,sourceBodyFrame,targetBodyFrame);
-      }
       let planeN = srcAB.clone().cross(srcBC);
       if (planeN.lengthSq() < EPS){
         planeN = currentB.clone().sub(A).cross(currentC.clone().sub(currentB));
@@ -2286,18 +2174,8 @@ export async function bakeRetarget(options){
         );
         setBoneWorldQuaternion(
           chain.tUpperName,
-          swing.clone().multiply(upperWorldQ).normalize()
+          swing.multiply(upperWorldQ).normalize()
         );
-
-        if (chain.tUpperControlName){
-          const controlQ = worldQuaternionOf(chain.tUpperControlName);
-          if (controlQ){
-            setBoneWorldQuaternion(
-              chain.tUpperControlName,
-              swing.clone().multiply(controlQ).normalize()
-            );
-          }
-        }
         rebuildWorldOut();
       }
 
@@ -2319,18 +2197,8 @@ export async function bakeRetarget(options){
           );
           setBoneWorldQuaternion(
             chain.tMidName,
-            swing.clone().multiply(foreWorldQ).normalize()
+            swing.multiply(foreWorldQ).normalize()
           );
-
-          if (chain.tMidControlName){
-            const controlQ = worldQuaternionOf(chain.tMidControlName);
-            if (controlQ){
-              setBoneWorldQuaternion(
-                chain.tMidControlName,
-                swing.clone().multiply(controlQ).normalize()
-              );
-            }
-          }
           rebuildWorldOut();
         }
       }
@@ -2470,8 +2338,6 @@ export async function bakeRetarget(options){
     virtualChainStabilizedCount:virtualTargets.length,
     naturalHierarchyTargets:naturallyConnectedVirtualTargets,
     naturalHierarchyTargetCount:naturallyConnectedVirtualTargets.length,
-    staticBodyFrameRemap:Boolean(sourceBodyFrame && targetBodyFrame),
-    fkControlSolverSync:Boolean(controlMirrorBySource.size),
     handEndEffectorCorrection:Boolean(correctHands),
     handEndEffectorChains:armCorrectionChains.map(c => ({
       side:c.side,
@@ -2481,11 +2347,6 @@ export async function bakeRetarget(options){
       targetFore:c.targetForeLen,
       reachScale:c.reachScale
     })),
-    fkControlMirrorTargets:[...new Set(records
-      .filter(r => r._control_mirror)
-      .map(r => r.targetBone?.name)
-      .filter(Boolean))],
-    fkControlMirrorCount:records.filter(r => r._control_mirror).length,
     footEndEffectorCorrection:Boolean(correctFeet),
     footEndEffectorChains:footCorrectionChains.map(c => ({
       side:c.side,
