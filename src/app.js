@@ -19,7 +19,7 @@ import {
   previewRestPosePreset,
   captureRestPosePreset,
   serializeMap
-} from "./retarget-engine.js?v=20260919-cloudrig-no-arm2bone1";
+} from "./retarget-engine.js?v=20260919-pelvis-foot1";
 
 const $ = id => document.getElementById(id);
 
