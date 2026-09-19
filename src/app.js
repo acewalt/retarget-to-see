@@ -19,7 +19,7 @@ import {
   previewRestPosePreset,
   captureRestPosePreset,
   serializeMap
-} from "./retarget-engine.js?v=20260919-setroot-spine1";
+} from "./retarget-engine.js?v=20260919-leg-directions1";
 
 const $ = id => document.getElementById(id);
 
@@ -1893,9 +1893,11 @@ async function applyRetarget(){
     const footCorrectionText = result.footEndEffectorCorrection
       ? ` Corrección de pies activa: ${result.footEndEffectorChains.length} piernas, solo rotación 2-bone.`
       : "";
-    const bendPlaneText = result.limbBendPlaneMode === "source-plane"
-      ? " Bend plane piernas: Source."
-      : "";
+    const bendPlaneText = result.limbBendPlaneMode === "source-segment-directions"
+      ? " Piernas: direcciones Source muslo+tibia 1:1."
+      : result.limbBendPlaneMode === "source-plane"
+        ? " Bend plane piernas: Source."
+        : "";
     const splitRootText = result.splitRootMappings?.length
       ? ` Set-as-Root separado: ${result.splitRootMappings.join("; ")} (ROT al deform, LOC al objeto).`
       : "";
