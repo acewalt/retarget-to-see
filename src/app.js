@@ -20,7 +20,7 @@ import {
   captureRestPosePreset,
   captureCurrentRigReference,
   serializeMap
-} from "./retarget-engine.js?v=20260919-worldbind1";
+} from "./retarget-engine.js?v=20260919-original-rig-action2";
 
 const $ = id => document.getElementById(id);
 
@@ -84,6 +84,7 @@ const els = {
   convertIkBtn:$("convertIkBtn"),
   exportGlbBtn:$("exportGlbBtn"),
   exportClipBtn:$("exportClipBtn"),
+  exportOriginalRigBtn:$("exportOriginalRigBtn"),
   progressWrap:$("progressWrap"),
   progressBar:$("progressBar"),
   progressText:$("progressText"),
@@ -2745,6 +2746,7 @@ function updateButtons(){
     : "El Target FBX no contiene controles IK utilizables; el retarget FK/deform sigue funcionando.";
   els.exportGlbBtn.disabled = state.busy || !state.targetRig || !state.retargetClip;
   els.exportClipBtn.disabled = state.busy || !state.retargetClip;
+  els.exportOriginalRigBtn.disabled = state.busy || !state.targetRig || !state.retargetClip;
 
   if (els.captureCommonReferenceBtn){
     els.captureCommonReferenceBtn.disabled = state.busy || !state.sourceRig || !state.targetRig || !state.sourceClip;
@@ -3006,6 +3008,193 @@ async function exportGlb(){
   }
 }
 
+
+function chooseOriginalRigAnchors(boneNames,restMap){
+  const points = boneNames
+    .map(name => {
+      const r = restMap.get(name);
+      return r ? {name,p:r.worldPosition.clone()} : null;
+    })
+    .filter(Boolean);
+
+  if (points.length < 3){
+    throw new Error("Se necesitan al menos 3 deform bones para alinear la Action con Blender.");
+  }
+
+  let a = points[0], b = points[1], bestD = -1;
+  for (let i=0;i<points.length;i++){
+    for (let j=i+1;j<points.length;j++){
+      const d = points[i].p.distanceToSquared(points[j].p);
+      if (d > bestD){
+        bestD = d;
+        a = points[i];
+        b = points[j];
+      }
+    }
+  }
+
+  const ab = b.p.clone().sub(a.p);
+  const abLen = Math.max(ab.length(),1e-8);
+  let c = null, bestArea = -1;
+
+  for (const item of points){
+    if (item === a || item === b) continue;
+    const ac = item.p.clone().sub(a.p);
+    const area = ab.clone().cross(ac).length()/abLen;
+    if (area > bestArea){
+      bestArea = area;
+      c = item;
+    }
+  }
+
+  if (!c || bestArea < 1e-5){
+    throw new Error("No pude encontrar 3 huesos no colineales para alinear la Action.");
+  }
+
+  return [a.name,b.name,c.name];
+}
+
+function originalRigExportBoneNames(){
+  if (!state.targetRig) return [];
+
+  const names = new Set();
+
+  for (const name of state.targetRig.weightedBoneNames || []){
+    if (state.targetRig.boneMap.has(name)) names.add(name);
+  }
+
+  for (const track of state.retargetClip?.tracks || []){
+    const m = String(track.name || "").match(/^(.*)\.(position|quaternion|scale)$/);
+    if (!m) continue;
+    const name = m[1];
+    if (state.targetRig.boneMap.has(name)) names.add(name);
+  }
+
+  return [...names].sort((a,b) => {
+    const da = state.targetRig.rest.get(a)?.depth ?? 0;
+    const db = state.targetRig.rest.get(b)?.depth ?? 0;
+    return da-db || a.localeCompare(b);
+  });
+}
+
+function sampleOriginalRigActionData(){
+  if (!state.targetRig || !state.retargetClip){
+    throw new Error("Primero aplica el retargeting.");
+  }
+
+  const rig = state.targetRig;
+  const clip = state.retargetClip;
+  const boneNames = originalRigExportBoneNames();
+
+  if (boneNames.length < 3){
+    throw new Error("No hay suficientes huesos Target para hornear una Action del rig original.");
+  }
+
+  const fps = Math.max(1,Number(els.fpsInput.value) || 30);
+  const times = uniqueClipTimes(clip);
+  const savedTime = state.currentTime;
+  const bones = {};
+
+  for (const name of boneNames){
+    const rest = rig.rest.get(name);
+    if (!rest) continue;
+    bones[name] = {
+      restPos:[
+        rest.worldPosition.x,
+        rest.worldPosition.y,
+        rest.worldPosition.z
+      ],
+      frames:[]
+    };
+  }
+
+  const anchors = chooseOriginalRigAnchors(Object.keys(bones),rig.rest);
+
+  resetRigToRest(rig);
+  activateClip(rig,clip);
+
+  const posePos = new THREE.Vector3();
+  const poseQ = new THREE.Quaternion();
+  const poseScale = new THREE.Vector3();
+
+  for (const t of times){
+    setRigTime(rig,t);
+
+    for (const name of Object.keys(bones)){
+      const bone = rig.boneMap.get(name);
+      const rest = rig.rest.get(name);
+      if (!bone || !rest) continue;
+
+      bone.matrixWorld.decompose(posePos,poseQ,poseScale);
+
+      const dp = posePos.clone().sub(rest.worldPosition);
+      const dq = poseQ.clone()
+        .multiply(rest.worldQuaternion.clone().invert())
+        .normalize();
+
+      bones[name].frames.push({
+        dp:[dp.x,dp.y,dp.z],
+        dq:[dq.x,dq.y,dq.z,dq.w]
+      });
+    }
+  }
+
+  resetRigToRest(rig);
+  activateClip(rig,clip);
+  setRigTime(rig,Math.max(0,Math.min(savedTime,clip.duration)));
+  rig.root.updateMatrixWorld(true);
+
+  return {
+    format:"retarget-to-see-original-rig-action",
+    version:1,
+    targetFile:rig.fileName || "Target",
+    actionName:"Retargeted_RIG_Original",
+    muteConstraints:true,
+    startFrame:0,
+    fps,
+    duration:clip.duration,
+    times,
+    anchors,
+    bones
+  };
+}
+
+function exportOriginalRigActionPackage(){
+  if (!state.targetRig || !state.retargetClip || state.busy) return;
+
+  state.playing = false;
+  els.playBtn.textContent = "▶";
+  setBusy(true);
+  setStatus("Horneando Action compatible con el RIG original…");
+
+  try{
+    const data = sampleOriginalRigActionData();
+    const name = safeBaseName(state.targetRig.fileName || "target")
+      + "_RIG_original_action.json";
+
+    downloadBlob(
+      new Blob([JSON.stringify(data,null,2)],{type:"application/json"}),
+      name
+    );
+
+    setStatus(
+      "Paquete Action para rig original generado: " + name
+      + ". " + Object.keys(data.bones).length + " huesos, "
+      + data.times.length + " muestras. Descarga tambien blender_original_action_importer.py, selecciona el armature ORIGINAL en Blender, ejecuta el importador y elige este JSON.",
+      "success"
+    );
+  }catch(err){
+    console.error(err);
+    setStatus(
+      "No pude generar la Action para el rig original: " + (err.message || err),
+      "error"
+    );
+  }finally{
+    setBusy(false);
+  }
+}
+
+
 function exportClipJson(){
   if (!state.retargetClip) return;
   const json = state.retargetClip.toJSON ? state.retargetClip.toJSON() : THREE.AnimationClip.toJSON(state.retargetClip);
@@ -3186,6 +3375,7 @@ els.applyBtn.addEventListener("click",applyRetarget);
 els.convertIkBtn.addEventListener("click",convertIk);
 els.exportGlbBtn.addEventListener("click",exportGlb);
 els.exportClipBtn.addEventListener("click",exportClipJson);
+els.exportOriginalRigBtn.addEventListener("click",exportOriginalRigActionPackage);
 els.frameSourceBtn.addEventListener("click",() => {
   sourceView.frame();
   syncViewportCamera(sourceView,targetView);
