@@ -19,7 +19,7 @@ import {
   previewRestPosePreset,
   captureRestPosePreset,
   serializeMap
-} from "./retarget-engine.js?v=20260919-hips-basis-foot1";
+} from "./retarget-engine.js?v=20260919-pelvis-y-axis1";
 
 const $ = id => document.getElementById(id);
 
@@ -1877,7 +1877,7 @@ async function applyRetarget(){
       ? ` Root translation mode: ${result.rootTranslationMode}.`
       : "";
     const pelvisSafetyText = result.pelvisTranslationRedirectedToRoot
-      ? " Hips location se aplicó al objeto completo, no al DEF-Hips."
+      ? ` Hips location se aplicó al objeto completo, no al DEF-Hips.${result.pelvisAxisConvertedBlenderZToThreeY ? " Eje vertical convertido Blender Z → Three.js Y." : ""}`
       : "";
     const virtualChainText = result.virtualChainStabilizedCount
       ? ` Cadenas desconectadas estabilizadas: ${result.virtualChainStabilizedCount} huesos (${result.virtualChainStabilizedTargets.slice(0,8).join(", ")}${result.virtualChainStabilizedTargets.length > 8 ? "…" : ""}).`
