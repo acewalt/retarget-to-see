@@ -1749,14 +1749,45 @@ export async function bakeRetarget(options){
       const targetReach = targetUpperLen + targetForeLen;
       if (sourceReach < EPS || targetReach < EPS) continue;
 
+      // Feet need a body-space anchor, not only a thigh-space anchor.
+      // Using UpLeg→Foot directly makes any Hips→thigh rest offset/proportion
+      // difference become a permanent foot-placement error. Keep the Target's
+      // own rest Hips→Foot offset and transfer only the Source motion relative
+      // to Hips.
+      const sHips = resolveBone(sourceRig,"Hips",sourcePrefix)
+        || resolveBone(sourceRig,"Pelvis",sourcePrefix);
+      const tHipsName = sHips ? sourceToTarget.get(sHips.name) : null;
+      const sHipsRest = sHips ? sourceRest.get(sHips.name) : null;
+      const tHipsRest = tHipsName ? targetRig.rest.get(tHipsName) : null;
+
+      let sourcePelvisToFootRest = null;
+      let targetPelvisToFootRest = null;
+      let pelvisFootScale = targetReach/sourceReach;
+
+      if (sHipsRest && tHipsRest){
+        sourcePelvisToFootRest = sEndRest.worldPosition.clone()
+          .sub(sHipsRest.worldPosition);
+        targetPelvisToFootRest = tEndRest.worldPosition.clone()
+          .sub(tHipsRest.worldPosition);
+
+        const sourcePelvisFootLen = sourcePelvisToFootRest.length();
+        const targetPelvisFootLen = targetPelvisToFootRest.length();
+        if (sourcePelvisFootLen > EPS && targetPelvisFootLen > EPS){
+          pelvisFootScale = targetPelvisFootLen/sourcePelvisFootLen;
+        }
+      }
+
       footCorrectionChains.push({
         kind:"LEG",
         side,
-        sUpper,sMid,sEnd,
-        tUpperName,tMidName,tEndName,
+        sUpper,sMid,sEnd,sHips,
+        tUpperName,tMidName,tEndName,tHipsName,
         sourceUpperLen,sourceForeLen,
         targetUpperLen,targetForeLen,
-        reachScale:targetReach/sourceReach
+        reachScale:targetReach/sourceReach,
+        sourcePelvisToFootRest,
+        targetPelvisToFootRest,
+        pelvisFootScale
       });
     }
   }
@@ -2101,7 +2132,46 @@ export async function bakeRetarget(options){
       if (!A || !currentB || !currentC || !originalHandQ) continue;
       if (srcAC.lengthSq() < EPS || srcAB.lengthSq() < EPS) continue;
 
-      let desiredC = A.clone().add(srcAC.multiplyScalar(chain.reachScale));
+      let desiredC = null;
+
+      if (
+        chain.kind === "LEG"
+        && chain.sHips
+        && chain.tHipsName
+        && chain.sourcePelvisToFootRest
+        && chain.targetPelvisToFootRest
+      ){
+        const srcHipsPos = new THREE.Vector3()
+          .setFromMatrixPosition(chain.sHips.matrixWorld);
+        const targetHipsPos = worldPositionOf(chain.tHipsName);
+
+        if (targetHipsPos){
+          // Source Hips→Foot contains the complete seated/standing/step pose,
+          // independent of global translation. Remove global root yaw because
+          // the Target object receives that rotation on its own.
+          const sourcePelvisToFootPose = srcC.clone().sub(srcHipsPos);
+          if (rootDeltaInv){
+            sourcePelvisToFootPose.applyQuaternion(rootDeltaInv);
+          }
+
+          // Transfer DELTA-from-rest instead of the absolute Source vector.
+          // At zero motion this lands exactly on the Target's own rest foot;
+          // during animation it follows the Source foot relative to its Hips.
+          const sourceFootMotion = sourcePelvisToFootPose
+            .sub(chain.sourcePelvisToFootRest)
+            .multiplyScalar(chain.pelvisFootScale);
+
+          desiredC = targetHipsPos.clone()
+            .add(chain.targetPelvisToFootRest)
+            .add(sourceFootMotion);
+        }
+      }
+
+      // Fallback for unusual rigs where Hips cannot be mapped.
+      if (!desiredC){
+        desiredC = A.clone().add(srcAC.multiplyScalar(chain.reachScale));
+      }
+
       let AC = desiredC.clone().sub(A);
       let d = AC.length();
       if (d < EPS) continue;
@@ -2361,7 +2431,11 @@ export async function bakeRetarget(options){
       sourceShin:c.sourceForeLen,
       targetThigh:c.targetUpperLen,
       targetShin:c.targetForeLen,
-      reachScale:c.reachScale
+      reachScale:c.reachScale,
+      pelvisFootScale:c.pelvisFootScale,
+      targetMode:(c.sHips && c.tHipsName && c.sourcePelvisToFootRest && c.targetPelvisToFootRest)
+        ? "pelvis-relative-rest-delta"
+        : "thigh-relative-fallback"
     })),
     splitRootMappings:[...new Set(records
       .filter(r => r._rotation_only || r._location_only)
