@@ -1749,31 +1749,50 @@ export async function bakeRetarget(options){
       const targetReach = targetUpperLen + targetForeLen;
       if (sourceReach < EPS || targetReach < EPS) continue;
 
-      // Feet need a body-space anchor, not only a thigh-space anchor.
-      // Using UpLeg→Foot directly makes any Hips→thigh rest offset/proportion
-      // difference become a permanent foot-placement error. Keep the Target's
-      // own rest Hips→Foot offset and transfer only the Source motion relative
-      // to Hips.
+      // Reproduce the useful part of the Mixamo control-rig retarget in
+      // HIPS POSE SPACE. A plain Hips→Foot world vector is insufficient:
+      // when the pelvis pitches/rolls during Sit To Stand the vector rotates
+      // around a moving pivot. The Blender addon avoids that by copying
+      // transforms in POSE space after rebasing the Source rest pose.
+      //
+      // We represent the same information without physically creating helper
+      // bones:
+      //   SourceRelPose = inverse(SourceHipsPose) * SourceFootPose
+      //   SourceDelta   = SourceRelPose * inverse(SourceRelRest)
+      //   TargetRelPose = scaled(SourceDelta) * TargetRelRest
+      //   TargetFoot    = TargetHipsPose * TargetRelPose
       const sHips = resolveBone(sourceRig,"Hips",sourcePrefix)
         || resolveBone(sourceRig,"Pelvis",sourcePrefix);
       const tHipsName = sHips ? sourceToTarget.get(sHips.name) : null;
       const sHipsRest = sHips ? sourceRest.get(sHips.name) : null;
       const tHipsRest = tHipsName ? targetRig.rest.get(tHipsName) : null;
 
-      let sourcePelvisToFootRest = null;
-      let targetPelvisToFootRest = null;
+      let sourceFootRelRest = null;
+      let sourceKneeRelRest = null;
+      let targetFootRelRest = null;
+      let targetKneeRelRest = null;
       let pelvisFootScale = targetReach/sourceReach;
+      let pelvisKneeScale = targetUpperLen/Math.max(sourceUpperLen,EPS);
 
       if (sHipsRest && tHipsRest){
-        sourcePelvisToFootRest = sEndRest.worldPosition.clone()
-          .sub(sHipsRest.worldPosition);
-        targetPelvisToFootRest = tEndRest.worldPosition.clone()
-          .sub(tHipsRest.worldPosition);
+        const srcHipsRestInv = sHipsRest.world.clone().invert();
+        const tgtHipsRestInv = tHipsRest.world.clone().invert();
 
-        const sourcePelvisFootLen = sourcePelvisToFootRest.length();
-        const targetPelvisFootLen = targetPelvisToFootRest.length();
-        if (sourcePelvisFootLen > EPS && targetPelvisFootLen > EPS){
-          pelvisFootScale = targetPelvisFootLen/sourcePelvisFootLen;
+        sourceFootRelRest = srcHipsRestInv.clone().multiply(sEndRest.world);
+        sourceKneeRelRest = srcHipsRestInv.clone().multiply(sMidRest.world);
+        targetFootRelRest = tgtHipsRestInv.clone().multiply(tEndRest.world);
+        targetKneeRelRest = tgtHipsRestInv.clone().multiply(tMidRest.world);
+
+        const srcFootRestPos = new THREE.Vector3().setFromMatrixPosition(sourceFootRelRest);
+        const tgtFootRestPos = new THREE.Vector3().setFromMatrixPosition(targetFootRelRest);
+        const srcKneeRestPos = new THREE.Vector3().setFromMatrixPosition(sourceKneeRelRest);
+        const tgtKneeRestPos = new THREE.Vector3().setFromMatrixPosition(targetKneeRelRest);
+
+        if (srcFootRestPos.length() > EPS && tgtFootRestPos.length() > EPS){
+          pelvisFootScale = tgtFootRestPos.length()/srcFootRestPos.length();
+        }
+        if (srcKneeRestPos.length() > EPS && tgtKneeRestPos.length() > EPS){
+          pelvisKneeScale = tgtKneeRestPos.length()/srcKneeRestPos.length();
         }
       }
 
@@ -1785,9 +1804,12 @@ export async function bakeRetarget(options){
         sourceUpperLen,sourceForeLen,
         targetUpperLen,targetForeLen,
         reachScale:targetReach/sourceReach,
-        sourcePelvisToFootRest,
-        targetPelvisToFootRest,
-        pelvisFootScale
+        sourceFootRelRest,
+        sourceKneeRelRest,
+        targetFootRelRest,
+        targetKneeRelRest,
+        pelvisFootScale,
+        pelvisKneeScale
       });
     }
   }
@@ -2133,41 +2155,77 @@ export async function bakeRetarget(options){
       if (srcAC.lengthSq() < EPS || srcAB.lengthSq() < EPS) continue;
 
       let desiredC = null;
+      let desiredKneeReference = null;
+      let desiredEndWorldQ = originalHandQ;
 
       if (
         chain.kind === "LEG"
         && chain.sHips
         && chain.tHipsName
-        && chain.sourcePelvisToFootRest
-        && chain.targetPelvisToFootRest
+        && chain.sourceFootRelRest
+        && chain.sourceKneeRelRest
+        && chain.targetFootRelRest
+        && chain.targetKneeRelRest
       ){
-        const srcHipsPos = new THREE.Vector3()
-          .setFromMatrixPosition(chain.sHips.matrixWorld);
-        const targetHipsPos = worldPositionOf(chain.tHipsName);
+        const targetHipsWorld = worldOut.get(chain.tHipsName);
+        if (targetHipsWorld){
+          // Source leg matrices in pelvis pose space. This automatically
+          // removes armature/root translation and Hips rotation instead of
+          // trying to subtract them as unrelated channels.
+          const srcHipsPoseInv = chain.sHips.matrixWorld.clone().invert();
+          const srcFootRelPose = srcHipsPoseInv.clone().multiply(chain.sEnd.matrixWorld);
+          const srcKneeRelPose = srcHipsPoseInv.clone().multiply(chain.sMid.matrixWorld);
 
-        if (targetHipsPos){
-          // Source Hips→Foot contains the complete seated/standing/step pose,
-          // independent of global translation. Remove global root yaw because
-          // the Target object receives that rotation on its own.
-          const sourcePelvisToFootPose = srcC.clone().sub(srcHipsPos);
-          if (rootDeltaInv){
-            sourcePelvisToFootPose.applyQuaternion(rootDeltaInv);
+          const footDelta = srcFootRelPose.clone()
+            .multiply(chain.sourceFootRelRest.clone().invert());
+          const kneeDelta = srcKneeRelPose.clone()
+            .multiply(chain.sourceKneeRelRest.clone().invert());
+
+          // Rebase the full delta onto Target proportions. Scale only the
+          // translational component; preserve the quaternion exactly.
+          function scaledPoseDelta(delta,scale){
+            const p = new THREE.Vector3();
+            const q = new THREE.Quaternion();
+            const s = new THREE.Vector3();
+            delta.decompose(p,q,s);
+            p.multiplyScalar(scale);
+            return new THREE.Matrix4().compose(
+              p,
+              q.normalize(),
+              new THREE.Vector3(1,1,1)
+            );
           }
 
-          // Transfer DELTA-from-rest instead of the absolute Source vector.
-          // At zero motion this lands exactly on the Target's own rest foot;
-          // during animation it follows the Source foot relative to its Hips.
-          const sourceFootMotion = sourcePelvisToFootPose
-            .sub(chain.sourcePelvisToFootRest)
-            .multiplyScalar(chain.pelvisFootScale);
+          const targetFootRelPose = scaledPoseDelta(
+            footDelta,
+            chain.pelvisFootScale
+          ).multiply(chain.targetFootRelRest.clone());
 
-          desiredC = targetHipsPos.clone()
-            .add(chain.targetPelvisToFootRest)
-            .add(sourceFootMotion);
+          const targetKneeRelPose = scaledPoseDelta(
+            kneeDelta,
+            chain.pelvisKneeScale
+          ).multiply(chain.targetKneeRelRest.clone());
+
+          const desiredFootWorld = targetHipsWorld.clone()
+            .multiply(targetFootRelPose);
+          const desiredKneeWorld = targetHipsWorld.clone()
+            .multiply(targetKneeRelPose);
+
+          desiredC = new THREE.Vector3().setFromMatrixPosition(desiredFootWorld);
+          desiredKneeReference = new THREE.Vector3()
+            .setFromMatrixPosition(desiredKneeWorld);
+
+          desiredEndWorldQ = new THREE.Quaternion();
+          desiredFootWorld.decompose(
+            new THREE.Vector3(),
+            desiredEndWorldQ,
+            new THREE.Vector3()
+          );
+          desiredEndWorldQ.normalize();
         }
       }
 
-      // Fallback for unusual rigs where Hips cannot be mapped.
+      // Fallback for rigs where a usable Hips pose space cannot be built.
       if (!desiredC){
         desiredC = A.clone().add(srcAC.multiplyScalar(chain.reachScale));
       }
@@ -2221,7 +2279,7 @@ export async function bakeRetarget(options){
 
       const candidate1 = base.clone().add(perp.clone().multiplyScalar(h));
       const candidate2 = base.clone().add(perp.clone().multiplyScalar(-h));
-      const sourceMidReference = A.clone().add(
+      const sourceMidReference = desiredKneeReference || A.clone().add(
         srcAB.clone().multiplyScalar(
           chain.targetUpperLen/Math.max(chain.sourceUpperLen,EPS)
         )
@@ -2290,7 +2348,7 @@ export async function bakeRetarget(options){
         new THREE.Vector3()
       );
       endState.quaternion.copy(
-        endParentQ.invert().multiply(originalHandQ).normalize()
+        endParentQ.invert().multiply(desiredEndWorldQ).normalize()
       );
       rebuildWorldOut();
     }
@@ -2433,8 +2491,8 @@ export async function bakeRetarget(options){
       targetShin:c.targetForeLen,
       reachScale:c.reachScale,
       pelvisFootScale:c.pelvisFootScale,
-      targetMode:(c.sHips && c.tHipsName && c.sourcePelvisToFootRest && c.targetPelvisToFootRest)
-        ? "pelvis-relative-rest-delta"
+      targetMode:(c.sHips && c.tHipsName && c.sourceFootRelRest && c.targetFootRelRest)
+        ? "hips-pose-space-matrix"
         : "thigh-relative-fallback"
     })),
     splitRootMappings:[...new Set(records
