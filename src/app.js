@@ -19,7 +19,7 @@ import {
   previewRestPosePreset,
   captureRestPosePreset,
   serializeMap
-} from "./retarget-engine.js?v=20260919-mixamo-helper-matrix2";
+} from "./retarget-engine.js?v=20260919-cloudrig-no-arm2bone1";
 
 const $ = id => document.getElementById(id);
 
@@ -62,7 +62,6 @@ const els = {
   useWorldLocation:$("useWorldLocation"),
   correctHands:$("correctHands"),
   correctFeet:$("correctFeet"),
-  useMixamoHelperRig:$("useMixamoHelperRig"),
   headSource:$("headSource"),
   headTarget:$("headTarget"),
   facePerRegion:$("facePerRegion"),
@@ -108,152 +107,6 @@ const state = {
   busy:false,
   faceRegions:Object.fromEntries(FACE_REGIONS.map(r => [r,1]))
 };
-
-function compactBoneName(name=""){
-  return String(name).toLowerCase().replace(/[^a-z0-9]/g,"");
-}
-
-function findRigBone(rig,...names){
-  if (!rig) return null;
-  for (const name of names){
-    const exact = rig.boneMap?.get(name);
-    if (exact) return exact;
-  }
-  const wanted = new Set(names.map(compactBoneName));
-  return rig.bones.find(b => wanted.has(compactBoneName(b.name))) || null;
-}
-
-// Viewport-only CloudRig skeleton.
-// IMPORTANT: do not draw "virtual anatomical bridges" between DEF branches
-// that are disconnected in the exported FBX (Chest->Shoulder, Hips->Thigh,
-// Chest->Neck, Neck->Head). Those links are created by Blender constraints in
-// the original rig, but the constraints are absent in FBX. Drawing a straight
-// line between those unrelated branch roots creates the giant cyan/green
-// spikes seen in the viewport even when the mesh retarget itself is correct.
-//
-// Only draw edges that are genuine parent-chain segments in the exported DEF
-// skeleton. This changes visualization only; it does NOT alter retargeting.
-const CLOUDRIG_DISPLAY_EDGES = [
-  ["DEF-Hips","DEF-Spine"],
-  ["DEF-Spine","DEF-Chest"],
-
-  ["DEF-ShoulderL","DEF-UpperArm_1L"],
-  ["DEF-UpperArm_1L","DEF-UpperArm_2L"],
-  ["DEF-UpperArm_2L","DEF-Forearm_1L"],
-  ["DEF-Forearm_1L","DEF-Forearm_2L"],
-  ["DEF-Forearm_2L","DEF-HandL"],
-
-  ["DEF-ShoulderR","DEF-UpperArm_1R"],
-  ["DEF-UpperArm_1R","DEF-UpperArm_2R"],
-  ["DEF-UpperArm_2R","DEF-Forearm_1R"],
-  ["DEF-Forearm_1R","DEF-Forearm_2R"],
-  ["DEF-Forearm_2R","DEF-HandR"],
-
-  ["DEF-Thigh_1L","DEF-Thigh_2L"],
-  ["DEF-Thigh_2L","DEF-Knee_1L"],
-  ["DEF-Knee_1L","DEF-Knee_2L"],
-  ["DEF-Knee_2L","DEF-FootL"],
-  ["DEF-FootL","DEF-ToesL"],
-
-  ["DEF-Thigh_1R","DEF-Thigh_2R"],
-  ["DEF-Thigh_2R","DEF-Knee_1R"],
-  ["DEF-Knee_1R","DEF-Knee_2R"],
-  ["DEF-Knee_2R","DEF-FootR"],
-  ["DEF-FootR","DEF-ToesR"]
-];
-
-const CLOUDRIG_DISPLAY_POINTS = [
-  "DEF-Hips","DEF-Spine","DEF-Chest","DEF-Neck","DEF-Head",
-  "DEF-ShoulderL","DEF-ShoulderR",
-  "DEF-UpperArm_1L","DEF-UpperArm_2L","DEF-Forearm_1L","DEF-Forearm_2L","DEF-HandL",
-  "DEF-UpperArm_1R","DEF-UpperArm_2R","DEF-Forearm_1R","DEF-Forearm_2R","DEF-HandR",
-  "DEF-Thigh_1L","DEF-Thigh_2L","DEF-Knee_1L","DEF-Knee_2L","DEF-FootL","DEF-ToesL",
-  "DEF-Thigh_1R","DEF-Thigh_2R","DEF-Knee_1R","DEF-Knee_2R","DEF-FootR","DEF-ToesR"
-];
-
-function createCloudRigDeformHelper(rig){
-  const resolvedEdges = CLOUDRIG_DISPLAY_EDGES
-    .map(([a,b]) => [findRigBone(rig,a),findRigBone(rig,b)])
-    .filter(([a,b]) => a && b);
-
-  const geometry = new THREE.BufferGeometry();
-  const positions = new Float32Array(resolvedEdges.length * 2 * 3);
-  geometry.setAttribute("position",new THREE.BufferAttribute(positions,3));
-
-  const material = new THREE.LineBasicMaterial({
-    color:0x39d7ff,
-    transparent:true,
-    opacity:.88,
-    depthTest:false
-  });
-
-  const lines = new THREE.LineSegments(geometry,material);
-  lines.frustumCulled = false;
-  lines.userData.resolvedEdges = resolvedEdges;
-  lines.userData.updateFromRig = () => {
-    rig.root.updateMatrixWorld(true);
-    const attr = geometry.getAttribute("position");
-    const pA = new THREE.Vector3();
-    const pB = new THREE.Vector3();
-    let i = 0;
-    for (const [a,b] of resolvedEdges){
-      pA.setFromMatrixPosition(a.matrixWorld);
-      pB.setFromMatrixPosition(b.matrixWorld);
-      attr.setXYZ(i++,pA.x,pA.y,pA.z);
-      attr.setXYZ(i++,pB.x,pB.y,pB.z);
-    }
-    attr.needsUpdate = true;
-    geometry.computeBoundingSphere();
-  };
-  const pointBones = CLOUDRIG_DISPLAY_POINTS
-    .map(name => findRigBone(rig,name))
-    .filter(Boolean);
-  const pointGeometry = new THREE.BufferGeometry();
-  const pointPositions = new Float32Array(pointBones.length * 3);
-  pointGeometry.setAttribute("position",new THREE.BufferAttribute(pointPositions,3));
-  const pointMaterial = new THREE.PointsMaterial({
-    color:0x39d7ff,
-    size:4,
-    sizeAttenuation:false,
-    transparent:true,
-    opacity:.95,
-    depthTest:false
-  });
-  const points = new THREE.Points(pointGeometry,pointMaterial);
-  points.frustumCulled = false;
-
-  const group = new THREE.Group();
-  group.add(lines);
-  group.add(points);
-  group.userData.updateFromRig = () => {
-    rig.root.updateMatrixWorld(true);
-
-    // Native DEF chain segments.
-    lines.userData.updateFromRig();
-
-    // Root joints of disconnected branches are shown as points rather than
-    // fake long links across the viewport.
-    const attr = pointGeometry.getAttribute("position");
-    const p = new THREE.Vector3();
-    pointBones.forEach((bone,index) => {
-      p.setFromMatrixPosition(bone.matrixWorld);
-      attr.setXYZ(index,p.x,p.y,p.z);
-    });
-    attr.needsUpdate = true;
-    pointGeometry.computeBoundingSphere();
-  };
-
-  group.userData.updateFromRig();
-  return group;
-}
-
-function cloudRigDisplayBones(rig){
-  const names = new Set([
-    ...CLOUDRIG_DISPLAY_EDGES.flat(),
-    ...CLOUDRIG_DISPLAY_POINTS
-  ].map(compactBoneName));
-  return rig.bones.filter(b => names.has(compactBoneName(b.name)));
-}
 
 class RigViewport{
   constructor(container){
@@ -311,21 +164,10 @@ class RigViewport{
     this.root = rig?.root || null;
     if (this.root){
       this.scene.add(this.root);
-
-      // CloudRig FBX contains hundreds of control/STR/IK bones whose Blender
-      // constraints are not present in the exported file. Three.js
-      // SkeletonHelper draws every one of them, which creates the huge
-      // detached "spider" lines seen around an otherwise correct retarget.
-      // For CloudRig, display only the anatomical DEF chains we actually bake.
-      if (rig.cloudRigProfile){
-        this.helper = createCloudRigDeformHelper(rig);
-      } else {
-        this.helper = new THREE.SkeletonHelper(this.root);
-        this.helper.material.transparent = true;
-        this.helper.material.opacity = .72;
-        this.helper.material.depthTest = false;
-      }
-
+      this.helper = new THREE.SkeletonHelper(this.root);
+      this.helper.material.transparent = true;
+      this.helper.material.opacity = .72;
+      this.helper.material.depthTest = false;
       this.scene.add(this.helper);
       this.frame();
     }
@@ -336,11 +178,7 @@ class RigViewport{
     const box = new THREE.Box3();
     let initialized = false;
     const p = new THREE.Vector3();
-    const frameBones = this.rig.cloudRigProfile
-      ? cloudRigDisplayBones(this.rig)
-      : this.rig.bones;
-
-    for (const bone of frameBones){
+    for (const bone of this.rig.bones){
       p.setFromMatrixPosition(bone.matrixWorld);
       if (!initialized){
         box.min.copy(p);box.max.copy(p);initialized=true;
@@ -404,11 +242,7 @@ class RigViewport{
   }
   render(){
     this.controls.update();
-    if (this.helper?.userData?.updateFromRig){
-      this.helper.userData.updateFromRig();
-    } else if (this.helper){
-      this.helper.updateMatrixWorld(true);
-    }
+    if (this.helper) this.helper.updateMatrixWorld(true);
     this.renderer.render(this.scene,this.camera);
   }
 }
@@ -1253,7 +1087,6 @@ function buildBoneMapDiagnostic(){
       use_world_location:Boolean(els.useWorldLocation.checked),
       correct_hands:Boolean(els.correctHands.checked),
       correct_feet:Boolean(els.correctFeet.checked),
-      use_mixamo_helper_rig:Boolean(els.useMixamoHelperRig.checked),
       use_current_source_pose_as_rest:Boolean(els.useCurrentRest.checked),
       use_custom_rest_pose:Boolean(els.useCustomRest.checked),
       custom_rest_pose_name:state.restPosePreset?.name || null,
@@ -2018,7 +1851,6 @@ async function applyRetarget(){
       useWorldLocation:els.useWorldLocation.checked,
       correctHands:els.correctHands.checked,
       correctFeet:els.correctFeet.checked,
-      useMixamoHelperRig:els.useMixamoHelperRig.checked,
       headSource:els.headSource.value,
       headTarget:els.headTarget.value,
       faceSettings:faceSettings(),
@@ -2061,9 +1893,6 @@ async function applyRetarget(){
     const footCorrectionText = result.footEndEffectorCorrection
       ? ` Corrección de pies activa: ${result.footEndEffectorChains.length} piernas, solo rotación 2-bone.`
       : "";
-    const mixamoHelperText = result.footCorrectionMode === "mixamo-helper-pose-space"
-      ? " Rig intermedio Mixamo activo: Foot IK en POSE space del armature."
-      : "";
     const bendPlaneText = result.limbBendPlaneMode === "source-plane"
       ? " Bend plane piernas: Source."
       : "";
@@ -2075,7 +1904,7 @@ async function applyRetarget(){
           .map(x => `${x.sources.join("+")}→${x.target}`)
           .join("; ")}.`
       : "";
-    let message = `Retarget FK terminado: ${result.validPairs}/${result.totalPairs} pares, cuerpo ${coverage.coreValid}/${coverage.coreTotal}, dedos ${coverage.fingerValid}/${coverage.fingerTotal}, ${result.frameCount} frames, scale ${result.locationScale.toFixed(4)}${scaleMethod}.${rootMotionText}${rootRotationText}${rootTranslationText}${pelvisSafetyText}${virtualChainText}${naturalHierarchyText}${handCorrectionText}${footCorrectionText}${mixamoHelperText}${bendPlaneText}${splitRootText}${collapsedText}${redirectedText}${unresolvedText}`;
+    let message = `Retarget FK terminado: ${result.validPairs}/${result.totalPairs} pares, cuerpo ${coverage.coreValid}/${coverage.coreTotal}, dedos ${coverage.fingerValid}/${coverage.fingerTotal}, ${result.frameCount} frames, scale ${result.locationScale.toFixed(4)}${scaleMethod}.${rootMotionText}${rootRotationText}${rootTranslationText}${pelvisSafetyText}${virtualChainText}${naturalHierarchyText}${handCorrectionText}${footCorrectionText}${bendPlaneText}${splitRootText}${collapsedText}${redirectedText}${unresolvedText}`;
 
     if (els.autoBakeIk.checked && state.ikChains.length){
       try{
