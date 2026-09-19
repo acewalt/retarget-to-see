@@ -20,8 +20,8 @@ import {
   captureRestPosePreset,
   captureCurrentRigReference,
   serializeMap
-} from "./retarget-engine.js?v=20260919-deform-controls2";
-import { injectAnimationIntoOriginalFbx } from "./fbx-animation-injector.js?v=20260919-deform-controls2";
+} from "./retarget-engine.js?v=20260919-deform-controls3";
+import { injectAnimationIntoOriginalFbx } from "./fbx-animation-injector.js?v=20260919-deform-controls3";
 
 const $ = id => document.getElementById(id);
 
@@ -3147,23 +3147,51 @@ function mergeExactTargetClips(previewClip,controlClip,rig){
     byName.set(track.name,track.clone());
   }
 
-  // Controls/FK/root are added from the ORIGINAL_RIG bake.
+  // Controls/FK/root are added from the ORIGINAL_RIG bake, but only
+  // when the track target is an ACTUAL Bone from the imported Target.
+  // bakeRetarget can still emit a scene-container track such as x1.position;
+  // that object is not a Model in the original FBX and must never reach the
+  // binary injector.
+  const rejectedControlTracks = [];
   for (const track of controlClip?.tracks || []){
+    let parsed = null;
+    try{
+      parsed = THREE.PropertyBinding.parseTrackName(track.name);
+    }catch{
+      parsed = null;
+    }
+
+    const nodeName = parsed?.nodeName || "";
+    const bone = rig?.boneMap?.get(nodeName) || null;
+
+    if (!bone){
+      rejectedControlTracks.push(track.name);
+      continue;
+    }
+
     if (!byName.has(track.name)){
       byName.set(track.name,track.clone());
     }
   }
+
+  // Keep this diagnostic on the clip for the export status/error path.
+  const rejected = rejectedControlTracks;
 
   const duration = Math.max(
     Number(previewClip.duration) || 0,
     Number(controlClip?.duration) || 0
   );
 
-  return new THREE.AnimationClip(
+  const merged = new THREE.AnimationClip(
     "Retargeted_EXACT_TARGET_Baked",
     duration,
     [...byName.values()]
   );
+  merged.userData = {
+    ...(merged.userData || {}),
+    rejectedNonBoneTracks:rejected
+  };
+  return merged;
 }
 
 function clipTargetNodeNames(clip){
@@ -3175,6 +3203,33 @@ function clipTargetNodeNames(clip){
     }catch{}
   }
   return out;
+}
+
+function assertExactClipTargetsOnlyTargetBones(rig,clip){
+  const invalid = [];
+
+  for (const track of clip?.tracks || []){
+    let parsed = null;
+    try{
+      parsed = THREE.PropertyBinding.parseTrackName(track.name);
+    }catch{
+      parsed = null;
+    }
+
+    const nodeName = parsed?.nodeName || "";
+    if (!nodeName || !rig?.boneMap?.has(nodeName)){
+      invalid.push(track.name);
+    }
+  }
+
+  if (invalid.length){
+    throw new Error(
+      "La Action exacta todavía contiene tracks que no son huesos reales del Target: "
+      + invalid.slice(0,12).join(", ")
+    );
+  }
+
+  return true;
 }
 
 function assertExactClipDrivesWeightedBones(rig,clip){
@@ -3343,6 +3398,7 @@ async function exportOriginalTargetRigFbx(){
     // user sees on the Target mesh. Merge it with the control bake so the same
     // FBX contains animated DEF bones AND the corresponding FK controls.
     const exactClip = mergeExactTargetClips(previewClip,direct.clip,rig);
+    assertExactClipTargetsOnlyTargetBones(rig,exactClip);
     const coverage = assertExactClipDrivesWeightedBones(rig,exactClip);
 
     resetRigToRest(rig);
@@ -3409,9 +3465,10 @@ async function exportOriginalTargetRigFbx(){
       + " DEF del archivo (" + coverage.animatedWeighted.length
       + "/" + coverage.totalWeighted + " grupos con peso detectados) y "
       + controlTargets.length + " controles FK/root. "
-      + "El track contenedor del viewport (por ejemplo x1.position) se descarta: "
-      + "el movimiento global lo lleva el hueso/control root real del Target. "
-      + "Esto corrige tanto la malla inmóvil como el error «Model x1 no existe».",
+      + "Tracks contenedor descartados: "
+      + ((exactClip.userData?.rejectedNonBoneTracks || []).join(", ") || "ninguno")
+      + ". El movimiento global válido lo lleva el hueso/control root real del Target. "
+      + "No se permite que x1.position/x1.quaternion u otros contenedores entren al FBX.",
       "success"
     );
   }catch(err){
