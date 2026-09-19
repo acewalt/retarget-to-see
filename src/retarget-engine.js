@@ -1512,8 +1512,38 @@ function horizontalYawDeltaFromBone(bone,restEntry){
   return new THREE.Quaternion().setFromAxisAngle(worldUp,angle);
 }
 
-function actualPairRecords(pairs,sourceRig,targetRig,sourcePrefix,targetPrefix){
+function actualPairRecords(
+  pairs,sourceRig,targetRig,sourcePrefix,targetPrefix,
+  targetMode="DEFORM_PREVIEW"
+){
   const out = [];
+  const originalRigMode = targetMode === "ORIGINAL_RIG";
+
+  // Export-to-original-rig path: use exactly the Target bones named by the
+  // preset. Do not redirect FK controls into DEF bones and do not collapse
+  // locomotion into the scene root. The real Blender CloudRig has its
+  // constraints/drivers, so its FK/control channels are the portable Action.
+  if (originalRigMode){
+    for (let pairIndex=0; pairIndex<(pairs || []).length; pairIndex++){
+      const raw = pairs[pairIndex];
+      const sourceBone = resolveBone(sourceRig,raw.source,sourcePrefix);
+      const targetBone = resolveBone(targetRig,raw.target,targetPrefix);
+      if (!sourceBone || !targetBone) continue;
+
+      out.push({
+        ...raw,
+        pairIndex,
+        set_as_root:false,
+        sourceBone,
+        targetBone,
+        targetRoot:false,
+        sourceRest:sourceRig.rest.get(sourceBone.name),
+        targetRest:targetRig.rest.get(targetBone.name),
+        _original_rig_direct:true
+      });
+    }
+    return out;
+  }
 
   for (let pairIndex=0; pairIndex<(pairs || []).length; pairIndex++){
     const raw = pairs[pairIndex];
@@ -1521,13 +1551,30 @@ function actualPairRecords(pairs,sourceRig,targetRig,sourcePrefix,targetPrefix){
     if (!sourceBone) continue;
 
     if (isGlobalRootLocationPair(raw)){
+      let axes = raw.axes;
+      let converted = false;
+
+      if (targetRig.cloudRigProfile){
+        // Preset masks come from Blender Z-up. FBXLoader gives us a Y-up
+        // Three.js scene: X stays X, Blender Y -> Three Z, Blender Z -> Three Y.
+        const a = String(raw.axes || "XYZ").toUpperCase();
+        let mapped = "";
+        if (a.includes("X")) mapped += "X";
+        if (a.includes("Z")) mapped += "Y";
+        if (a.includes("Y")) mapped += "Z";
+        axes = mapped || raw.axes;
+        converted = String(axes) !== String(raw.axes);
+      }
+
       out.push({
         ...raw,
+        axes,
         pairIndex,
         sourceBone,
         targetBone:null,
         targetRoot:true,
         _location_only:true,
+        _cloudrig_blender_axes_to_three:converted,
         sourceRest:sourceRig.rest.get(sourceBone.name),
         targetRest:null
       });
@@ -1711,6 +1758,7 @@ export async function bakeRetarget(options){
     useWorldLocation=false,headSource="",headTarget="",
     correctHands=true,correctFeet=true,
     faceSettings={global:1,perRegion:false,regions:{}},
+    targetMode="DEFORM_PREVIEW",
     onProgress
   } = options || {};
 
@@ -1744,7 +1792,9 @@ export async function bakeRetarget(options){
     ? targetRestOverride
     : targetRig.rest;
 
-  const records = actualPairRecords(pairs,sourceRig,targetRig,sourcePrefix,targetPrefix);
+  const records = actualPairRecords(
+    pairs,sourceRig,targetRig,sourcePrefix,targetPrefix,targetMode
+  );
   if (!records.length) throw new Error("Ningún par del mapa existe en ambos FBX.");
 
   // Return source to frame zero for the actual bake.
@@ -2798,6 +2848,7 @@ export async function bakeRetarget(options){
 
   return {
     clip,
+    targetMode,
     targetReferenceUsed:Boolean(targetRestOverride instanceof Map && targetRestOverride.size),
     validPairs:new Set(records.map(r => r.pairIndex)).size,
     totalPairs:pairs.length,
