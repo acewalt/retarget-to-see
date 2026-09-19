@@ -153,30 +153,49 @@ function decomposeWorld(matrix){
 }
 
 function computeVisibleRestBounds(root){
-  // Measure the actual rendered model, not control/pole/helper bones.
-  // This is captured before animation is activated, so it is a stable
-  // rest/bind-space visual size reference for both viewport framing and
-  // retarget translation scale.
+  // Measure the rendered/skinned model only. geometry.boundingBox is NOT
+  // sufficient for SkinnedMesh: it describes undeformed geometry space and
+  // can be wildly wrong after FBX bind matrices/object transforms. That was
+  // the cause of one viewport becoming microscopic and the other gigantic.
   root.updateMatrixWorld(true);
   const box = new THREE.Box3();
   let initialized = false;
   let meshCount = 0;
+  let skinnedMeshCount = 0;
 
   root.traverse(obj => {
-    if (!obj.isMesh || !obj.geometry) return;
+    if (!obj.isMesh) return;
 
-    const g = obj.geometry;
-    if (!g.boundingBox) g.computeBoundingBox?.();
-    if (!g.boundingBox || g.boundingBox.isEmpty()) return;
+    let localBox = null;
 
-    const b = g.boundingBox.clone().applyMatrix4(obj.matrixWorld);
-    if (b.isEmpty()) return;
+    if (obj.isSkinnedMesh && typeof obj.computeBoundingBox === "function"){
+      // Three.js evaluates every vertex through the current skeleton into
+      // the SkinnedMesh local frame. At rig creation this is the rest/bind
+      // state we want to compare across differently-rigged copies.
+      obj.skeleton?.update?.();
+      obj.computeBoundingBox();
+      if (obj.boundingBox && !obj.boundingBox.isEmpty()){
+        localBox = obj.boundingBox.clone();
+        skinnedMeshCount++;
+      }
+    } else if (obj.geometry){
+      const g = obj.geometry;
+      if (!g.boundingBox) g.computeBoundingBox?.();
+      if (g.boundingBox && !g.boundingBox.isEmpty()){
+        localBox = g.boundingBox.clone();
+      }
+    }
+
+    if (!localBox) return;
+
+    const worldBox = localBox.applyMatrix4(obj.matrixWorld);
+    if (worldBox.isEmpty()) return;
 
     if (!initialized){
-      box.copy(b);
+      box.copy(worldBox);
       initialized = true;
     } else {
-      box.union(b);
+      box.union(worldBox);
     }
     meshCount++;
   });
@@ -185,6 +204,7 @@ function computeVisibleRestBounds(root){
     return {
       valid:false,
       meshCount:0,
+      skinnedMeshCount:0,
       box:null,
       center:new THREE.Vector3(),
       size:new THREE.Vector3(),
@@ -197,6 +217,7 @@ function computeVisibleRestBounds(root){
   return {
     valid:true,
     meshCount,
+    skinnedMeshCount,
     box,
     center,
     size,
