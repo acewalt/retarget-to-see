@@ -20,7 +20,7 @@ import {
   captureRestPosePreset,
   captureCurrentRigReference,
   serializeMap
-} from "./retarget-engine.js?v=20260919-fbx-meters1";
+} from "./retarget-engine.js?v=20260919-preserve-bind1";
 
 const $ = id => document.getElementById(id);
 
@@ -681,138 +681,6 @@ function installGlbSafeMaterials(root){
       for (const [obj,material] of previous){
         obj.material = material;
       }
-    }
-  };
-}
-
-function isNearlyIdentityTransform(obj){
-  const p = obj.position;
-  const q = obj.quaternion;
-  const s = obj.scale;
-  return (
-    Math.abs(p.x) < 1e-7
-    && Math.abs(p.y) < 1e-7
-    && Math.abs(p.z) < 1e-7
-    && Math.abs(q.x) < 1e-7
-    && Math.abs(q.y) < 1e-7
-    && Math.abs(q.z) < 1e-7
-    && Math.abs(Math.abs(q.w)-1) < 1e-7
-    && Math.abs(s.x-1) < 1e-7
-    && Math.abs(s.y-1) < 1e-7
-    && Math.abs(s.z-1) < 1e-7
-  );
-}
-
-function normalizeSkeletonAncestorsForGlb(root){
-  root.updateMatrixWorld(true);
-
-  // Find non-bone transform nodes directly above skeleton branches. CloudRig
-  // x1.fbx has RIG-Sintel = RotX(-90°), Scale(100), while the skinned mesh is
-  // a separate root sibling. FBX bind matrices compensate this, but exporting
-  // that joint ancestor literally to glTF makes Blender's imported armature
-  // extremely fragile. Push the transform into its children, then make the
-  // ancestor identity. World matrices remain mathematically unchanged.
-  const candidates = new Set();
-
-  root.traverse(obj => {
-    if (!obj.isSkinnedMesh || !obj.skeleton) return;
-
-    for (const bone of obj.skeleton.bones || []){
-      let node = bone.parent;
-      while (node && node !== root){
-        if (
-          !node.isBone
-          && node.children?.some(c => c.isBone)
-          && !isNearlyIdentityTransform(node)
-        ){
-          candidates.add(node);
-        }
-        node = node.parent;
-      }
-    }
-  });
-
-  // Deepest first avoids a parent normalization changing the local matrix of
-  // another candidate before it is processed.
-  const ordered = [...candidates].sort((a,b) => {
-    const depth = o => {
-      let d=0,p=o;
-      while (p && p!==root){ d++; p=p.parent; }
-      return d;
-    };
-    return depth(b)-depth(a);
-  });
-
-  const snapshots = [];
-  const normalized = [];
-
-  for (const node of ordered){
-    node.updateMatrix();
-    const nodeLocal = node.matrix.clone();
-
-    const childSnapshots = node.children.map(child => ({
-      child,
-      position:child.position.clone(),
-      quaternion:child.quaternion.clone(),
-      scale:child.scale.clone()
-    }));
-
-    snapshots.push({
-      node,
-      position:node.position.clone(),
-      quaternion:node.quaternion.clone(),
-      scale:node.scale.clone(),
-      children:childSnapshots
-    });
-
-    for (const child of node.children){
-      child.updateMatrix();
-      const bakedLocal = nodeLocal.clone().multiply(child.matrix);
-      bakedLocal.decompose(
-        child.position,
-        child.quaternion,
-        child.scale
-      );
-      child.quaternion.normalize();
-      child.updateMatrix();
-    }
-
-    const oldScale = node.scale.clone();
-    const oldQuat = node.quaternion.clone();
-
-    node.position.set(0,0,0);
-    node.quaternion.identity();
-    node.scale.set(1,1,1);
-    node.updateMatrix();
-
-    normalized.push({
-      name:node.name || node.type || "Object3D",
-      scale:[oldScale.x,oldScale.y,oldScale.z],
-      quaternion:[oldQuat.x,oldQuat.y,oldQuat.z,oldQuat.w]
-    });
-  }
-
-  root.updateMatrixWorld(true);
-
-  return {
-    normalized,
-    restore(){
-      // Reverse order to reconstruct the exact original hierarchy.
-      for (let i=snapshots.length-1;i>=0;i--){
-        const snap = snapshots[i];
-        snap.node.position.copy(snap.position);
-        snap.node.quaternion.copy(snap.quaternion);
-        snap.node.scale.copy(snap.scale);
-        snap.node.updateMatrix();
-
-        for (const c of snap.children){
-          c.child.position.copy(c.position);
-          c.child.quaternion.copy(c.quaternion);
-          c.child.scale.copy(c.scale);
-          c.child.updateMatrix();
-        }
-      }
-      root.updateMatrixWorld(true);
     }
   };
 }
@@ -2604,28 +2472,24 @@ async function exportGlb(){
   setStatus("Preparando GLB…");
 
   try{
-    // Restore the exact imported Target rest transforms before export.
-    // resetRigToRest() restores root position/rotation/SCALE as captured on
-    // import; GLTFExporter then serializes those TRS values unchanged.
+    // IMPORTANT: preserve the exact imported skeleton hierarchy and inverse
+    // bind relationship. CloudRig uses a non-unit armature ancestor
+    // (RIG-Sintel scale 100 / X rotation) that is compensated by FBX skin bind
+    // matrices. Reparenting/baking that transform without recomputing every
+    // inverse bind matrix explodes the mesh in Blender.
+    //
+    // Unit conversion to meters already happens once at FBX load on the ROOT,
+    // so no skeleton transform normalization is needed here.
     resetRigToRest(state.targetRig);
-    const scaleInfoBefore = exportScaleReport(state.targetRig.root);
+    state.targetRig.root.updateMatrixWorld(true);
 
-    const skeletonNormalization = normalizeSkeletonAncestorsForGlb(
-      state.targetRig.root
+    const scaleInfo = exportScaleReport(state.targetRig.root);
+    const exporter = new GLTFExporter();
+    const result = await parseGlbWithFallback(
+      exporter,
+      state.targetRig.root,
+      clip
     );
-    const scaleInfoNormalized = exportScaleReport(state.targetRig.root);
-
-    let result;
-    try{
-      const exporter = new GLTFExporter();
-      result = await parseGlbWithFallback(
-        exporter,
-        state.targetRig.root,
-        clip
-      );
-    }finally{
-      skeletonNormalization.restore();
-    }
 
     const name = safeBaseName(state.targetRig.fileName || "target")
       + "_retargeted.glb";
@@ -2638,32 +2502,24 @@ async function exportGlb(){
     activateClip(state.targetRig,clip);
     seek(0);
 
-    const rs = scaleInfoBefore.rootScale;
-    const ws = scaleInfoBefore.worldSize;
-    const nws = scaleInfoNormalized.worldSize;
-    const normalizedNodes = skeletonNormalization.normalized.length
-      ? " Skeleton normalizado para GLB: "
-        + skeletonNormalization.normalized.map(n =>
-          `${n.name} scale=[${n.scale.map(v => v.toFixed(4)).join(",")}]`
-        ).join("; ")
-        + "."
-      : " Skeleton GLB: no requirió normalización.";
+    const rs = scaleInfo.rootScale;
+    const ws = scaleInfo.worldSize;
     const materialNote = result.materialMode === "white-fallback"
       ? " Materiales: fallback blanco sin texturas."
       : result.strippedTextures
         ? ` Materiales originales; ${result.strippedTextures} textura(s) inválida(s) omitida(s).`
         : " Materiales originales.";
 
-    const nodeScaleNote = scaleInfoBefore.nonUnitObjects.length
-      ? " Escalas internas originales no-unit: "
-        + scaleInfoBefore.nonUnitObjects.map(x =>
+    const nodeScaleNote = scaleInfo.nonUnitObjects.length
+      ? " Escalas internas preservadas: "
+        + scaleInfo.nonUnitObjects.map(x =>
           `${x.name}=[${x.x.toFixed(4)},${x.y.toFixed(4)},${x.z.toFixed(4)}]`
         ).join("; ")
         + "."
       : "";
 
     setStatus(
-      `GLB exportado: ${name}. Root scale=[${rs.x.toFixed(4)}, ${rs.y.toFixed(4)}, ${rs.z.toFixed(4)}]. Bounds world original=[${ws.x.toFixed(4)}, ${ws.y.toFixed(4)}, ${ws.z.toFixed(4)}] m, normalizado=[${nws.x.toFixed(4)}, ${nws.y.toFixed(4)}, ${nws.z.toFixed(4)}] m. FBX→glTF units ya normalizadas a metros.${normalizedNodes}${nodeScaleNote}${materialNote}`,
+      `GLB exportado: ${name}. Root scale=[${rs.x.toFixed(4)}, ${rs.y.toFixed(4)}, ${rs.z.toFixed(4)}]. Bounds world=[${ws.x.toFixed(4)}, ${ws.y.toFixed(4)}, ${ws.z.toFixed(4)}] m. FBX→glTF en metros. Bind matrices y jerarquía del skin preservadas.${nodeScaleNote}${materialNote}`,
       "success"
     );
   }catch(err){
