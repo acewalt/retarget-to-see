@@ -575,7 +575,8 @@ async function loadFbx(file,kind){
     const weightedInfo = rig.weightedBoneNames?.size
       ? ` · ${rig.weightedBoneNames.size} deform reales`
       : "";
-    els.targetMeta.textContent = `${file.name} · ${rig.bones.length} huesos${weightedInfo}${ignored}`;
+    const profileInfo = rig.cloudRigProfile ? " · CloudRig DEF profile" : "";
+    els.targetMeta.textContent = `${file.name} · ${rig.bones.length} huesos${weightedInfo}${profileInfo}${ignored}`;
     els.exportGlbBtn.disabled = true;
     els.exportClipBtn.disabled = true;
     els.convertIkBtn.disabled = true;
@@ -1068,6 +1069,7 @@ function buildBoneMapDiagnostic(){
       boneCount:state.targetRig?.bones?.length || 0,
       skinBoneCount:state.targetRig?.skinBoneNames?.size || 0,
       weightedBoneCount:state.targetRig?.weightedBoneNames?.size || 0,
+      cloudRigProfile:Boolean(state.targetRig?.cloudRigProfile),
       hierarchyDriverBoneCount:state.targetRig?.hierarchyDriverBoneNames?.size || 0,
       hierarchyDriverBones:[...(state.targetRig?.hierarchyDriverBoneNames || [])].sort(),
       weightedBones:[...(state.targetRig?.weightedBoneNames || [])].sort(),
