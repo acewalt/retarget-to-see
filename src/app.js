@@ -1689,6 +1689,9 @@ async function applyRetarget(){
     const pelvisSafetyText = result.pelvisTranslationRedirectedToRoot
       ? " Hips location se aplicó al objeto completo, no al DEF-Hips."
       : "";
+    const virtualChainText = result.virtualChainStabilizedCount
+      ? ` Cadenas deform estabilizadas: ${result.virtualChainStabilizedCount} huesos (${result.virtualChainStabilizedTargets.slice(0,8).join(", ")}${result.virtualChainStabilizedTargets.length > 8 ? "…" : ""}).`
+      : "";
     const splitRootText = result.splitRootMappings?.length
       ? ` Set-as-Root separado: ${result.splitRootMappings.join("; ")} (ROT al deform, LOC al objeto).`
       : "";
@@ -1697,7 +1700,7 @@ async function applyRetarget(){
           .map(x => `${x.sources.join("+")}→${x.target}`)
           .join("; ")}.`
       : "";
-    let message = `Retarget FK terminado: ${result.validPairs}/${result.totalPairs} pares, cuerpo ${coverage.coreValid}/${coverage.coreTotal}, dedos ${coverage.fingerValid}/${coverage.fingerTotal}, ${result.frameCount} frames, scale ${result.locationScale.toFixed(4)}${scaleMethod}.${rootMotionText}${rootRotationText}${rootTranslationText}${pelvisSafetyText}${splitRootText}${collapsedText}${redirectedText}${unresolvedText}`;
+    let message = `Retarget FK terminado: ${result.validPairs}/${result.totalPairs} pares, cuerpo ${coverage.coreValid}/${coverage.coreTotal}, dedos ${coverage.fingerValid}/${coverage.fingerTotal}, ${result.frameCount} frames, scale ${result.locationScale.toFixed(4)}${scaleMethod}.${rootMotionText}${rootRotationText}${rootTranslationText}${pelvisSafetyText}${virtualChainText}${splitRootText}${collapsedText}${redirectedText}${unresolvedText}`;
 
     if (els.autoBakeIk.checked && state.ikChains.length){
       try{
