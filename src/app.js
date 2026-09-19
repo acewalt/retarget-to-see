@@ -20,7 +20,7 @@ import {
   captureRestPosePreset,
   captureCurrentRigReference,
   serializeMap
-} from "./retarget-engine.js?v=20260919-abs-camera1";
+} from "./retarget-engine.js?v=20260919-glb-skeleton-normalize1";
 
 const $ = id => document.getElementById(id);
 
@@ -404,13 +404,21 @@ class RigViewport{
     if (!this.rig || !this.rig.bones.length) return;
     this.rig.root.updateMatrixWorld(true);
 
-    // Frame the ACTUAL skinned pose. Box3.setFromObject() does not reliably
-    // apply skinning when precise=true, so use SkinnedMesh.computeBoundingBox
-    // explicitly and transform those bounds into world space.
-    let box = this.currentRenderedBox();
+    // Use the stable visual reference bounds captured from the SkinnedMesh
+    // before animation playback. Camera size must NOT change just because the
+    // current pose crouches, sits, or raises an arm. For identical geometry
+    // this gives identical camera scale on both sides.
+    let box = this.rig.visualRest?.box?.clone?.() || null;
     let initialized = Boolean(box && !box.isEmpty());
 
-    // Fallback only for skeleton-only FBXs.
+    // Fallback to the current rendered pose only when no reference mesh bounds
+    // are available.
+    if (!initialized){
+      box = this.currentRenderedBox();
+      initialized = Boolean(box && !box.isEmpty());
+    }
+
+    // Final fallback only for skeleton-only FBXs.
     if (!initialized){
       box = new THREE.Box3();
       const p = new THREE.Vector3();
@@ -435,7 +443,7 @@ class RigViewport{
 
     // Give the model deliberate breathing room. 1.25 was too tight,
     // especially with the linked cameras and crouched/sitting poses.
-    const framePadding = 1.85;
+    const framePadding = 2.65;
     const distance = radius
       / Math.tan(THREE.MathUtils.degToRad(this.camera.fov*.5))
       * framePadding;
@@ -673,6 +681,138 @@ function installGlbSafeMaterials(root){
       for (const [obj,material] of previous){
         obj.material = material;
       }
+    }
+  };
+}
+
+function isNearlyIdentityTransform(obj){
+  const p = obj.position;
+  const q = obj.quaternion;
+  const s = obj.scale;
+  return (
+    Math.abs(p.x) < 1e-7
+    && Math.abs(p.y) < 1e-7
+    && Math.abs(p.z) < 1e-7
+    && Math.abs(q.x) < 1e-7
+    && Math.abs(q.y) < 1e-7
+    && Math.abs(q.z) < 1e-7
+    && Math.abs(Math.abs(q.w)-1) < 1e-7
+    && Math.abs(s.x-1) < 1e-7
+    && Math.abs(s.y-1) < 1e-7
+    && Math.abs(s.z-1) < 1e-7
+  );
+}
+
+function normalizeSkeletonAncestorsForGlb(root){
+  root.updateMatrixWorld(true);
+
+  // Find non-bone transform nodes directly above skeleton branches. CloudRig
+  // x1.fbx has RIG-Sintel = RotX(-90°), Scale(100), while the skinned mesh is
+  // a separate root sibling. FBX bind matrices compensate this, but exporting
+  // that joint ancestor literally to glTF makes Blender's imported armature
+  // extremely fragile. Push the transform into its children, then make the
+  // ancestor identity. World matrices remain mathematically unchanged.
+  const candidates = new Set();
+
+  root.traverse(obj => {
+    if (!obj.isSkinnedMesh || !obj.skeleton) return;
+
+    for (const bone of obj.skeleton.bones || []){
+      let node = bone.parent;
+      while (node && node !== root){
+        if (
+          !node.isBone
+          && node.children?.some(c => c.isBone)
+          && !isNearlyIdentityTransform(node)
+        ){
+          candidates.add(node);
+        }
+        node = node.parent;
+      }
+    }
+  });
+
+  // Deepest first avoids a parent normalization changing the local matrix of
+  // another candidate before it is processed.
+  const ordered = [...candidates].sort((a,b) => {
+    const depth = o => {
+      let d=0,p=o;
+      while (p && p!==root){ d++; p=p.parent; }
+      return d;
+    };
+    return depth(b)-depth(a);
+  });
+
+  const snapshots = [];
+  const normalized = [];
+
+  for (const node of ordered){
+    node.updateMatrix();
+    const nodeLocal = node.matrix.clone();
+
+    const childSnapshots = node.children.map(child => ({
+      child,
+      position:child.position.clone(),
+      quaternion:child.quaternion.clone(),
+      scale:child.scale.clone()
+    }));
+
+    snapshots.push({
+      node,
+      position:node.position.clone(),
+      quaternion:node.quaternion.clone(),
+      scale:node.scale.clone(),
+      children:childSnapshots
+    });
+
+    for (const child of node.children){
+      child.updateMatrix();
+      const bakedLocal = nodeLocal.clone().multiply(child.matrix);
+      bakedLocal.decompose(
+        child.position,
+        child.quaternion,
+        child.scale
+      );
+      child.quaternion.normalize();
+      child.updateMatrix();
+    }
+
+    const oldScale = node.scale.clone();
+    const oldQuat = node.quaternion.clone();
+
+    node.position.set(0,0,0);
+    node.quaternion.identity();
+    node.scale.set(1,1,1);
+    node.updateMatrix();
+
+    normalized.push({
+      name:node.name || node.type || "Object3D",
+      scale:[oldScale.x,oldScale.y,oldScale.z],
+      quaternion:[oldQuat.x,oldQuat.y,oldQuat.z,oldQuat.w]
+    });
+  }
+
+  root.updateMatrixWorld(true);
+
+  return {
+    normalized,
+    restore(){
+      // Reverse order to reconstruct the exact original hierarchy.
+      for (let i=snapshots.length-1;i>=0;i--){
+        const snap = snapshots[i];
+        snap.node.position.copy(snap.position);
+        snap.node.quaternion.copy(snap.quaternion);
+        snap.node.scale.copy(snap.scale);
+        snap.node.updateMatrix();
+
+        for (const c of snap.children){
+          c.child.position.copy(c.position);
+          c.child.quaternion.copy(c.quaternion);
+          c.child.scale.copy(c.scale);
+          c.child.updateMatrix();
+        }
+      }
+      root.updateMatrixWorld(true);
     }
   };
 }
@@ -966,9 +1106,10 @@ async function loadFbx(file,kind){
     sourceView.setRig(rig);
 
     {
-      const b = sourceView.currentRenderedBox();
-      const sz = b?.getSize(new THREE.Vector3());
-      els.sourceMeta.textContent = `${file.name} · ${rig.bones.length} huesos · ${rig.animations.length} clips${rig.visualRest?.valid ? ` · bounds ${rig.visualRest.skinnedMeshCount || 0} skinned` : ""}${sz ? ` · visual H ${sz.y.toFixed(3)}` : ""}`;
+      const poseBox = sourceView.currentRenderedBox();
+      const poseSize = poseBox?.getSize(new THREE.Vector3());
+      const restH = Number(rig.visualRest?.height || 0);
+      els.sourceMeta.textContent = `${file.name} · ${rig.bones.length} huesos · ${rig.animations.length} clips${rig.visualRest?.valid ? ` · bounds ${rig.visualRest.skinnedMeshCount || 0} skinned` : ""}${restH ? ` · rest H ${restH.toFixed(3)}` : ""}${poseSize ? ` · pose H ${poseSize.y.toFixed(3)}` : ""}`;
     }
   } else {
     state.targetRig = rig;
@@ -994,9 +1135,10 @@ async function loadFbx(file,kind){
       : "";
     const profileInfo = rig.cloudRigProfile ? " · CloudRig DEF profile" : "";
     {
-      const b = targetView.currentRenderedBox();
-      const sz = b?.getSize(new THREE.Vector3());
-      els.targetMeta.textContent = `${file.name} · ${rig.bones.length} huesos${weightedInfo}${profileInfo}${ignored}${rig.visualRest?.valid ? ` · bounds ${rig.visualRest.skinnedMeshCount || 0} skinned` : ""}${sz ? ` · visual H ${sz.y.toFixed(3)}` : ""}`;
+      const poseBox = targetView.currentRenderedBox();
+      const poseSize = poseBox?.getSize(new THREE.Vector3());
+      const restH = Number(rig.visualRest?.height || 0);
+      els.targetMeta.textContent = `${file.name} · ${rig.bones.length} huesos${weightedInfo}${profileInfo}${ignored}${rig.visualRest?.valid ? ` · bounds ${rig.visualRest.skinnedMeshCount || 0} skinned` : ""}${restH ? ` · rest H ${restH.toFixed(3)}` : ""}${poseSize ? ` · pose H ${poseSize.y.toFixed(3)}` : ""}`;
     }
     els.exportGlbBtn.disabled = true;
     els.exportClipBtn.disabled = true;
@@ -2422,14 +2564,24 @@ async function exportGlb(){
     // resetRigToRest() restores root position/rotation/SCALE as captured on
     // import; GLTFExporter then serializes those TRS values unchanged.
     resetRigToRest(state.targetRig);
-    const scaleInfo = exportScaleReport(state.targetRig.root);
+    const scaleInfoBefore = exportScaleReport(state.targetRig.root);
 
-    const exporter = new GLTFExporter();
-    const result = await parseGlbWithFallback(
-      exporter,
-      state.targetRig.root,
-      clip
+    const skeletonNormalization = normalizeSkeletonAncestorsForGlb(
+      state.targetRig.root
     );
+    const scaleInfoNormalized = exportScaleReport(state.targetRig.root);
+
+    let result;
+    try{
+      const exporter = new GLTFExporter();
+      result = await parseGlbWithFallback(
+        exporter,
+        state.targetRig.root,
+        clip
+      );
+    }finally{
+      skeletonNormalization.restore();
+    }
 
     const name = safeBaseName(state.targetRig.fileName || "target")
       + "_retargeted.glb";
@@ -2442,24 +2594,32 @@ async function exportGlb(){
     activateClip(state.targetRig,clip);
     seek(0);
 
-    const rs = scaleInfo.rootScale;
-    const ws = scaleInfo.worldSize;
+    const rs = scaleInfoBefore.rootScale;
+    const ws = scaleInfoBefore.worldSize;
+    const nws = scaleInfoNormalized.worldSize;
+    const normalizedNodes = skeletonNormalization.normalized.length
+      ? " Skeleton normalizado para GLB: "
+        + skeletonNormalization.normalized.map(n =>
+          `${n.name} scale=[${n.scale.map(v => v.toFixed(4)).join(",")}]`
+        ).join("; ")
+        + "."
+      : " Skeleton GLB: no requirió normalización.";
     const materialNote = result.materialMode === "white-fallback"
       ? " Materiales: fallback blanco sin texturas."
       : result.strippedTextures
         ? ` Materiales originales; ${result.strippedTextures} textura(s) inválida(s) omitida(s).`
         : " Materiales originales.";
 
-    const nodeScaleNote = scaleInfo.nonUnitObjects.length
-      ? " Escalas internas no-unit: "
-        + scaleInfo.nonUnitObjects.map(x =>
+    const nodeScaleNote = scaleInfoBefore.nonUnitObjects.length
+      ? " Escalas internas originales no-unit: "
+        + scaleInfoBefore.nonUnitObjects.map(x =>
           `${x.name}=[${x.x.toFixed(4)},${x.y.toFixed(4)},${x.z.toFixed(4)}]`
         ).join("; ")
         + "."
       : "";
 
     setStatus(
-      `GLB exportado: ${name}. Root scale=[${rs.x.toFixed(4)}, ${rs.y.toFixed(4)}, ${rs.z.toFixed(4)}]. Bounds world=[${ws.x.toFixed(4)}, ${ws.y.toFixed(4)}, ${ws.z.toFixed(4)}].${nodeScaleNote}${materialNote}`,
+      `GLB exportado: ${name}. Root scale=[${rs.x.toFixed(4)}, ${rs.y.toFixed(4)}, ${rs.z.toFixed(4)}]. Bounds world original=[${ws.x.toFixed(4)}, ${ws.y.toFixed(4)}, ${ws.z.toFixed(4)}], normalizado=[${nws.x.toFixed(4)}, ${nws.y.toFixed(4)}, ${nws.z.toFixed(4)}].${normalizedNodes}${nodeScaleNote}${materialNote}`,
       "success"
     );
   }catch(err){
