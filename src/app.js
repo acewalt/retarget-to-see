@@ -1693,10 +1693,13 @@ async function applyRetarget(){
       ? " Hips location se aplicó al objeto completo, no al DEF-Hips."
       : "";
     const virtualChainText = result.virtualChainStabilizedCount
-      ? ` Cadenas deform estabilizadas: ${result.virtualChainStabilizedCount} huesos (${result.virtualChainStabilizedTargets.slice(0,8).join(", ")}${result.virtualChainStabilizedTargets.length > 8 ? "…" : ""}).`
+      ? ` Cadenas desconectadas estabilizadas: ${result.virtualChainStabilizedCount} huesos (${result.virtualChainStabilizedTargets.slice(0,8).join(", ")}${result.virtualChainStabilizedTargets.length > 8 ? "…" : ""}).`
+      : "";
+    const naturalHierarchyText = result.naturalHierarchyTargetCount
+      ? ` Jerarquía DEF nativa respetada: ${result.naturalHierarchyTargetCount} joints; sin Location extra.`
       : "";
     const handCorrectionText = result.handEndEffectorCorrection
-      ? ` Corrección de manos activa: ${result.handEndEffectorChains.length} brazos.`
+      ? ` Corrección de manos activa: ${result.handEndEffectorChains.length} brazos, solo rotación 2-bone.`
       : "";
     const splitRootText = result.splitRootMappings?.length
       ? ` Set-as-Root separado: ${result.splitRootMappings.join("; ")} (ROT al deform, LOC al objeto).`
@@ -1706,7 +1709,7 @@ async function applyRetarget(){
           .map(x => `${x.sources.join("+")}→${x.target}`)
           .join("; ")}.`
       : "";
-    let message = `Retarget FK terminado: ${result.validPairs}/${result.totalPairs} pares, cuerpo ${coverage.coreValid}/${coverage.coreTotal}, dedos ${coverage.fingerValid}/${coverage.fingerTotal}, ${result.frameCount} frames, scale ${result.locationScale.toFixed(4)}${scaleMethod}.${rootMotionText}${rootRotationText}${rootTranslationText}${pelvisSafetyText}${virtualChainText}${handCorrectionText}${splitRootText}${collapsedText}${redirectedText}${unresolvedText}`;
+    let message = `Retarget FK terminado: ${result.validPairs}/${result.totalPairs} pares, cuerpo ${coverage.coreValid}/${coverage.coreTotal}, dedos ${coverage.fingerValid}/${coverage.fingerTotal}, ${result.frameCount} frames, scale ${result.locationScale.toFixed(4)}${scaleMethod}.${rootMotionText}${rootRotationText}${rootTranslationText}${pelvisSafetyText}${virtualChainText}${naturalHierarchyText}${handCorrectionText}${splitRootText}${collapsedText}${redirectedText}${unresolvedText}`;
 
     if (els.autoBakeIk.checked && state.ikChains.length){
       try{
