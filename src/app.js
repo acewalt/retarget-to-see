@@ -19,7 +19,7 @@ import {
   previewRestPosePreset,
   captureRestPosePreset,
   serializeMap
-} from "./retarget-engine.js?v=20260919-baseline-cd52";
+} from "./retarget-engine.js?v=20260919-target-fk-bend-plane1";
 
 const $ = id => document.getElementById(id);
 
@@ -1891,6 +1891,9 @@ async function applyRetarget(){
     const footCorrectionText = result.footEndEffectorCorrection
       ? ` Corrección de pies activa: ${result.footEndEffectorChains.length} piernas, solo rotación 2-bone.`
       : "";
+    const bendPlaneText = result.limbBendPlaneMode === "target-current-fk-plane"
+      ? " Bend plane: Target FK actual (sin invertir lado)."
+      : "";
     const splitRootText = result.splitRootMappings?.length
       ? ` Set-as-Root separado: ${result.splitRootMappings.join("; ")} (ROT al deform, LOC al objeto).`
       : "";
@@ -1899,7 +1902,7 @@ async function applyRetarget(){
           .map(x => `${x.sources.join("+")}→${x.target}`)
           .join("; ")}.`
       : "";
-    let message = `Retarget FK terminado: ${result.validPairs}/${result.totalPairs} pares, cuerpo ${coverage.coreValid}/${coverage.coreTotal}, dedos ${coverage.fingerValid}/${coverage.fingerTotal}, ${result.frameCount} frames, scale ${result.locationScale.toFixed(4)}${scaleMethod}.${rootMotionText}${rootRotationText}${rootTranslationText}${pelvisSafetyText}${virtualChainText}${naturalHierarchyText}${handCorrectionText}${footCorrectionText}${splitRootText}${collapsedText}${redirectedText}${unresolvedText}`;
+    let message = `Retarget FK terminado: ${result.validPairs}/${result.totalPairs} pares, cuerpo ${coverage.coreValid}/${coverage.coreTotal}, dedos ${coverage.fingerValid}/${coverage.fingerTotal}, ${result.frameCount} frames, scale ${result.locationScale.toFixed(4)}${scaleMethod}.${rootMotionText}${rootRotationText}${rootTranslationText}${pelvisSafetyText}${virtualChainText}${naturalHierarchyText}${handCorrectionText}${footCorrectionText}${bendPlaneText}${splitRootText}${collapsedText}${redirectedText}${unresolvedText}`;
 
     if (els.autoBakeIk.checked && state.ikChains.length){
       try{
