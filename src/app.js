@@ -20,7 +20,7 @@ import {
   captureRestPosePreset,
   captureCurrentRigReference,
   serializeMap
-} from "./retarget-engine.js?v=20260919-current-frame1";
+} from "./retarget-engine.js?v=20260919-glb-export1";
 
 const $ = id => document.getElementById(id);
 
@@ -566,6 +566,153 @@ function restoreOriginalViewportMaterials(root){
       obj.material = originalMaterialByMesh.get(obj);
     }
   });
+}
+
+function textureHasUsableImage(texture){
+  if (!texture?.isTexture) return true;
+  const image = texture.image ?? texture.source?.data ?? null;
+  if (!image) return false;
+
+  // HTMLImageElement / ImageBitmap / Canvas / OffscreenCanvas / ImageData.
+  const width = Number(image.naturalWidth ?? image.videoWidth ?? image.width ?? 0);
+  const height = Number(image.naturalHeight ?? image.videoHeight ?? image.height ?? 0);
+  return width > 0 && height > 0;
+}
+
+function makeGlbSafeMaterial(material){
+  if (!material?.isMaterial) return material;
+
+  const clone = material.clone();
+
+  // GLTFExporter throws when FBXLoader created a Texture object whose image
+  // failed to decode/load. Strip only those invalid texture slots while
+  // keeping the material colors, roughness, metalness, opacity, etc.
+  const textureSlots = [
+    "map","alphaMap","aoMap","bumpMap","displacementMap",
+    "emissiveMap","envMap","lightMap","metalnessMap",
+    "normalMap","roughnessMap","specularMap","clearcoatMap",
+    "clearcoatNormalMap","clearcoatRoughnessMap","iridescenceMap",
+    "iridescenceThicknessMap","sheenColorMap","sheenRoughnessMap",
+    "transmissionMap","thicknessMap"
+  ];
+
+  for (const slot of textureSlots){
+    const tex = clone[slot];
+    if (tex?.isTexture && !textureHasUsableImage(tex)){
+      clone[slot] = null;
+    }
+  }
+
+  clone.needsUpdate = true;
+  return clone;
+}
+
+function installGlbSafeMaterials(root){
+  const previous = new Map();
+  let strippedTextures = 0;
+
+  root.traverse(obj => {
+    if (!obj.isMesh) return;
+    previous.set(obj,obj.material);
+
+    const materials = Array.isArray(obj.material)
+      ? obj.material
+      : [obj.material];
+
+    const safe = materials.map(mat => {
+      if (!mat?.isMaterial) return mat;
+      const clone = makeGlbSafeMaterial(mat);
+
+      for (const key of Object.keys(mat)){
+        const tex = mat[key];
+        if (tex?.isTexture && !textureHasUsableImage(tex)) strippedTextures++;
+      }
+      return clone;
+    });
+
+    obj.material = Array.isArray(obj.material) ? safe : safe[0];
+  });
+
+  return {
+    strippedTextures,
+    restore(){
+      for (const [obj,material] of previous){
+        obj.material = material;
+      }
+    }
+  };
+}
+
+function exportScaleReport(root){
+  root.updateMatrixWorld(true);
+
+  const worldBox = new THREE.Box3().setFromObject(root,true);
+  const worldSize = worldBox.isEmpty()
+    ? new THREE.Vector3()
+    : worldBox.getSize(new THREE.Vector3());
+
+  const nonUnitObjects = [];
+  root.traverse(obj => {
+    if (obj.isBone || obj.isMesh) return;
+    const s = obj.scale;
+    if (!s) return;
+    const nonUnit =
+      Math.abs(s.x-1) > 1e-5
+      || Math.abs(s.y-1) > 1e-5
+      || Math.abs(s.z-1) > 1e-5;
+    if (!nonUnit) return;
+    nonUnitObjects.push({
+      name:obj.name || obj.type || "Object3D",
+      x:s.x,y:s.y,z:s.z
+    });
+  });
+
+  return {
+    rootScale:root.scale.clone(),
+    worldSize,
+    nonUnitObjects:nonUnitObjects.slice(0,6)
+  };
+}
+
+async function parseGlbWithFallback(exporter,root,clip){
+  const options = {
+    binary:true,
+    trs:true,
+    onlyVisible:false,
+    animations:[clip],
+    includeCustomExtensions:true
+  };
+
+  // First attempt: original materials with only invalid images removed.
+  restoreOriginalViewportMaterials(root);
+  const safeMaterials = installGlbSafeMaterials(root);
+
+  try{
+    const data = await exporter.parseAsync(root,options);
+    return {
+      data,
+      materialMode:"original-sanitized",
+      strippedTextures:safeMaterials.strippedTextures
+    };
+  }catch(firstError){
+    console.warn("GLB export with original materials failed; retrying white",firstError);
+    safeMaterials.restore();
+
+    // Guaranteed texture-free fallback. This keeps geometry, skin, hierarchy,
+    // transforms and animation intact, which is what matters for validating
+    // scale/retargeting in Blender.
+    applySolidWhiteViewport(root);
+
+    const data = await exporter.parseAsync(root,options);
+    return {
+      data,
+      materialMode:"white-fallback",
+      strippedTextures:safeMaterials.strippedTextures,
+      firstError
+    };
+  }finally{
+    safeMaterials.restore();
+  }
 }
 
 function compactBoneName(name=""){
@@ -2227,32 +2374,61 @@ async function exportGlb(){
   state.playing = false;
   setBusy(true);
   setStatus("Preparando GLB…");
-  try{
-    resetRigToRest(state.targetRig);
 
-    // White is viewport-only. Preserve the Target's actual materials in the
-    // exported GLB and immediately return to solid white afterwards.
-    restoreOriginalViewportMaterials(state.targetRig.root);
+  try{
+    // Restore the exact imported Target rest transforms before export.
+    // resetRigToRest() restores root position/rotation/SCALE as captured on
+    // import; GLTFExporter then serializes those TRS values unchanged.
+    resetRigToRest(state.targetRig);
+    const scaleInfo = exportScaleReport(state.targetRig.root);
 
     const exporter = new GLTFExporter();
-    const data = await exporter.parseAsync(state.targetRig.root,{
-      binary:true,
-      trs:true,
-      onlyVisible:false,
-      animations:[clip],
-      includeCustomExtensions:true
-    });
-    const name = safeBaseName(state.targetRig.fileName || "target") + "_retargeted.glb";
-    downloadBlob(new Blob([data],{type:"model/gltf-binary"}),name);
+    const result = await parseGlbWithFallback(
+      exporter,
+      state.targetRig.root,
+      clip
+    );
+
+    const name = safeBaseName(state.targetRig.fileName || "target")
+      + "_retargeted.glb";
+    downloadBlob(
+      new Blob([result.data],{type:"model/gltf-binary"}),
+      name
+    );
 
     applySolidWhiteViewport(state.targetRig.root);
     activateClip(state.targetRig,clip);
     seek(0);
-    setStatus(`GLB exportado: ${name}`,"success");
+
+    const rs = scaleInfo.rootScale;
+    const ws = scaleInfo.worldSize;
+    const materialNote = result.materialMode === "white-fallback"
+      ? " Materiales: fallback blanco sin texturas."
+      : result.strippedTextures
+        ? ` Materiales originales; ${result.strippedTextures} textura(s) inválida(s) omitida(s).`
+        : " Materiales originales.";
+
+    const nodeScaleNote = scaleInfo.nonUnitObjects.length
+      ? " Escalas internas no-unit: "
+        + scaleInfo.nonUnitObjects.map(x =>
+          `${x.name}=[${x.x.toFixed(4)},${x.y.toFixed(4)},${x.z.toFixed(4)}]`
+        ).join("; ")
+        + "."
+      : "";
+
+    setStatus(
+      `GLB exportado: ${name}. Root scale=[${rs.x.toFixed(4)}, ${rs.y.toFixed(4)}, ${rs.z.toFixed(4)}]. Bounds world=[${ws.x.toFixed(4)}, ${ws.y.toFixed(4)}, ${ws.z.toFixed(4)}].${nodeScaleNote}${materialNote}`,
+      "success"
+    );
   }catch(err){
     console.error(err);
     applySolidWhiteViewport(state.targetRig.root);
-    setStatus(`Falló la exportación GLB: ${err.message || err}`,"error");
+    activateClip(state.targetRig,clip);
+    seek(0);
+    setStatus(
+      `Falló la exportación GLB: ${err.message || err}`,
+      "error"
+    );
   }finally{
     setBusy(false);
   }
