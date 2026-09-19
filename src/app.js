@@ -20,7 +20,7 @@ import {
   captureRestPosePreset,
   captureCurrentRigReference,
   serializeMap
-} from "./retarget-engine.js?v=20260919-target-reference2";
+} from "./retarget-engine.js?v=20260919-target-reference3";
 
 const $ = id => document.getElementById(id);
 
@@ -729,9 +729,25 @@ async function loadFbx(file,kind){
   if (kind === "Target"){
     ignoredTargetClips = Array.isArray(root.animations) ? root.animations.length : 0;
 
-    // Order matters:
-    //   bind pose -> upright normalization -> rest snapshot
-    targetBindInfo = forceTargetBindPose(root);
+    // A static Target FBX may deliberately be exported in the SAME reference
+    // pose as the Source (for example, both sitting). Calling skeleton.pose()
+    // here destroys that authored pose and silently restores the skin bind
+    // pose, which made our same-model/same-pose test invalid.
+    //
+    // Preserve static Target transforms exactly as imported. Only restore the
+    // bind pose when the file actually contains animation clips that we are
+    // intentionally discarding.
+    if (ignoredTargetClips > 0){
+      targetBindInfo = forceTargetBindPose(root);
+    } else {
+      root.updateMatrixWorld(true);
+      targetBindInfo = {
+        skeletonCount:0,
+        skinnedMeshes:0,
+        preservedImportedPose:true
+      };
+    }
+
     root.animations = [];
     targetOrientationInfo = normalizeTargetUpright(root);
   }
@@ -783,9 +799,11 @@ async function loadFbx(file,kind){
     els.exportClipBtn.disabled = true;
     els.convertIkBtn.disabled = true;
 
-    const bindDetail = targetBindInfo?.skeletonCount
-      ? ` Bind pose restaurado desde ${targetBindInfo.skeletonCount} skeleton(s).`
-      : " No se encontró un SkinnedMesh con bind pose; se usa la pose estática importada.";
+    const bindDetail = targetBindInfo?.preservedImportedPose
+      ? " Pose estática importada preservada (Target sin clips)."
+      : targetBindInfo?.skeletonCount
+        ? ` Bind pose restaurado desde ${targetBindInfo.skeletonCount} skeleton(s) porque el Target traía clips.`
+        : " No se encontró un SkinnedMesh con bind pose; se usa la pose estática importada.";
     const orientationDetail = targetOrientationInfo?.corrected
       ? ` Orientación corregida automáticamente (${targetOrientationInfo.angleDegrees.toFixed(1)}°) usando ${targetOrientationInfo.hips} → ${targetOrientationInfo.head}.`
       : ` ${targetOrientationInfo?.reason || "Orientación sin cambios."}`;
