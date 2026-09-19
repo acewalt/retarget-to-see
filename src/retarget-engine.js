@@ -2025,6 +2025,10 @@ export async function bakeRetarget(options){
       rootLocalQuat.clone(),
       rootRestScale
     );
+    const targetRootDeltaMatrix = targetRootCurrentMatrix.clone()
+      .multiply(targetRootRestMatrix.clone().invert());
+    const targetRootDeltaInvMatrix = targetRootDeltaMatrix.clone().invert();
+
     // PASS 1: rest locals + regular BASIS/WORLD location + world-delta rotation.
     for (const bone of sortedBones){
       const rest = targetRig.rest.get(bone.name);
