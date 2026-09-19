@@ -296,6 +296,12 @@
           <button id="exportGlbBtn" class="secondary" type="button" disabled>Descargar GLB</button>
           <button id="exportClipBtn" class="ghost" type="button" disabled>Animación JSON</button>
         </div>
+        <button id="exportOriginalRigBtn" class="primary big" type="button" disabled>
+          Action para RIG original (.py)
+        </button>
+        <p class="hint">
+          Genera una Action horneada para aplicarla directamente sobre el armature original del Target en Blender. Selecciona el armature original y ejecuta el .py en Scripting.
+        </p>
         <div class="progress-wrap" id="progressWrap" hidden>
           <div class="progress-track"><div id="progressBar"></div></div>
           <span id="progressText">0%</span>
@@ -314,6 +320,6 @@
     Port web del retargeting inspirado en <a href="https://github.com/Arcomade/BlendCap" target="_blank" rel="noreferrer">BlendCap</a> · GPL-3.0 · sin garantía.
   </footer>
 
-  <script type="module" src="./src/app.js?v=20260919-worldbind1"></script>
+  <script type="module" src="./src/app.js?v=20260919-original-rig-action1"></script>
 </body>
 </html>
