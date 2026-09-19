@@ -19,7 +19,7 @@ import {
   previewRestPosePreset,
   captureRestPosePreset,
   serializeMap
-} from "./retarget-engine.js?v=20260919-rest-relative-leg2";
+} from "./retarget-engine.js?v=20260919-visual-mesh-scale1";
 
 const $ = id => document.getElementById(id);
 
@@ -175,20 +175,26 @@ class RigViewport{
   frame(){
     if (!this.rig || !this.rig.bones.length) return;
     this.rig.root.updateMatrixWorld(true);
-    const box = new THREE.Box3();
-    let initialized = false;
-    const p = new THREE.Vector3();
-    for (const bone of this.rig.bones){
-      p.setFromMatrixPosition(bone.matrixWorld);
-      if (!initialized){
-        box.min.copy(p);box.max.copy(p);initialized=true;
-      } else box.expandByPoint(p);
-    }
-    // Include meshes when present.
-    const objectBox = new THREE.Box3().setFromObject(this.rig.root);
-    if (!objectBox.isEmpty()){
-      box.union(objectBox);
-      initialized = true;
+
+    // Frame the rendered character, not every control/pole/helper bone.
+    // CloudRig contains distant controls that made an identical character
+    // appear artificially smaller than its Mixamo version.
+    let box = this.rig.visualRest?.box?.clone?.() || null;
+    let initialized = Boolean(box && !box.isEmpty());
+
+    if (!initialized){
+      box = new THREE.Box3();
+      const p = new THREE.Vector3();
+      const names = this.rig.weightedBoneNames?.size
+        ? this.rig.weightedBoneNames
+        : new Set(this.rig.boneNames || []);
+      for (const bone of this.rig.bones){
+        if (!names.has(bone.name)) continue;
+        p.setFromMatrixPosition(bone.matrixWorld);
+        if (!initialized){
+          box.min.copy(p);box.max.copy(p);initialized=true;
+        } else box.expandByPoint(p);
+      }
     }
     if (!initialized) return;
 
@@ -1867,6 +1873,9 @@ async function applyRetarget(){
     const scaleMethod = result.locationScaleMethod
       ? ` (${result.locationScaleMethod}${result.locationScaleSamples ? `, n=${result.locationScaleSamples}` : ""})`
       : "";
+    const meshScaleText = Number.isFinite(result.sourceMeshHeight) && Number.isFinite(result.targetMeshHeight)
+      ? ` Mesh rest height Source=${result.sourceMeshHeight.toFixed(4)}, Target=${result.targetMeshHeight.toFixed(4)}${Number.isFinite(result.rawMeshScaleRatio) ? `, ratio=${result.rawMeshScaleRatio.toFixed(4)}` : ""}.`
+      : "";
     const rootMotionText = result.rootMotionChannels
       ? ` Root motion LOC: ${result.rootMotionChannels} canal(es) sobre el objeto completo${result.rootMotionSources?.length ? ` desde ${result.rootMotionSources.join(", ")}` : ""}.`
       : "";
@@ -1906,7 +1915,7 @@ async function applyRetarget(){
           .map(x => `${x.sources.join("+")}→${x.target}`)
           .join("; ")}.`
       : "";
-    let message = `Retarget FK terminado: ${result.validPairs}/${result.totalPairs} pares, cuerpo ${coverage.coreValid}/${coverage.coreTotal}, dedos ${coverage.fingerValid}/${coverage.fingerTotal}, ${result.frameCount} frames, scale ${result.locationScale.toFixed(4)}${scaleMethod}.${rootMotionText}${rootRotationText}${rootTranslationText}${pelvisSafetyText}${virtualChainText}${naturalHierarchyText}${handCorrectionText}${footCorrectionText}${bendPlaneText}${splitRootText}${collapsedText}${redirectedText}${unresolvedText}`;
+    let message = `Retarget FK terminado: ${result.validPairs}/${result.totalPairs} pares, cuerpo ${coverage.coreValid}/${coverage.coreTotal}, dedos ${coverage.fingerValid}/${coverage.fingerTotal}, ${result.frameCount} frames, scale ${result.locationScale.toFixed(4)}${scaleMethod}.${meshScaleText}${rootMotionText}${rootRotationText}${rootTranslationText}${pelvisSafetyText}${virtualChainText}${naturalHierarchyText}${handCorrectionText}${footCorrectionText}${bendPlaneText}${splitRootText}${collapsedText}${redirectedText}${unresolvedText}`;
 
     if (els.autoBakeIk.checked && state.ikChains.length){
       try{
