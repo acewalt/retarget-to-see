@@ -20,7 +20,8 @@ import {
   captureRestPosePreset,
   captureCurrentRigReference,
   serializeMap
-} from "./retarget-engine.js?v=20260919-original-names1";
+} from "./retarget-engine.js?v=20260919-exact-fbx1";
+import { injectAnimationIntoOriginalFbx } from "./fbx-animation-injector.js?v=20260919-exact-fbx1";
 
 const $ = id => document.getElementById(id);
 
@@ -102,6 +103,7 @@ const els = {
 const state = {
   sourceRig:null,
   targetRig:null,
+  targetOriginalFbxBytes:null,
   sourceClip:null,
   retargetClip:null,
   pairs:[],
@@ -1411,6 +1413,7 @@ async function loadFbx(file,kind){
   if (!file) return;
   setStatus(`Cargando ${kind}: ${file.name}…`);
   const buffer = await file.arrayBuffer();
+  const originalFileBytes = new Uint8Array(buffer.slice(0));
   const loader = new FBXLoader();
   let root;
   try{
@@ -1486,6 +1489,7 @@ async function loadFbx(file,kind){
     }
   } else {
     state.targetRig = rig;
+    state.targetOriginalFbxBytes = originalFileBytes;
     state.retargetClip = null;
     clearTargetReferenceState();
     if (els.targetRestBone) els.targetRestBone.value = "";
@@ -3205,7 +3209,13 @@ function countExportableOriginalRigNodes(root){
 }
 
 async function exportOriginalTargetRigFbx(){
-  if (!state.targetRig || !state.retargetClip || !state.sourceClip || state.busy) return;
+  if (
+    !state.targetRig
+    || !state.retargetClip
+    || !state.sourceClip
+    || !state.targetOriginalFbxBytes
+    || state.busy
+  ) return;
 
   const rig = state.targetRig;
   const previewClip = state.retargetClip;
@@ -3216,77 +3226,76 @@ async function exportOriginalTargetRigFbx(){
   els.playBtn.textContent = "▶";
   setBusy(true);
   hideProgress();
-  setStatus("Horneando Action sobre los controles originales del Target…");
+  setStatus("Inyectando la Action dentro del FBX Target ORIGINAL…");
 
   try{
-    const validation = validateOriginalCloudRigControls(rig);
+    validateOriginalCloudRigControls(rig);
     const direct = await bakeOriginalRigControlClip();
 
     resetRigToRest(rig);
     rig.root.updateMatrixWorld(true);
 
+    // Generate only an animation DONOR. Its skeleton is never downloaded.
+    // We use it solely to let the FBX animation writer encode the curves.
     exactNames = prepareExactOriginalNameExport(rig,direct.clip);
-    const exportClip = exactNames.clip;
-
-    const hierarchy = countExportableOriginalRigNodes(rig.root);
-    if (hierarchy.bones !== rig.bones.length){
-      throw new Error(
-        "La jerarquía Target cambió antes de exportar: "
-        + hierarchy.bones + " vs " + rig.bones.length + " huesos."
-      );
-    }
 
     const FBXExporter = await loadOriginalRigFbxExporter();
-    const exporter = new FBXExporter();
+    const donorExporter = new FBXExporter();
     const fps = Math.max(1,Number(els.fpsInput.value) || 30);
 
-    const bytes = exporter.parseSync(rig.root,{
+    const donorBytes = donorExporter.parseSync(rig.root,{
       preset:"blender",
       unitScale:100,
       bakeSpaceTransform:false,
       version:7400,
       fps,
-      animations:[exportClip],
+      animations:[exactNames.clip],
       includeAnimations:true,
       embedTextures:false,
       onlyVisible:false,
       objectFilter:(obj) => !obj.isMesh && !obj.isLight && !obj.isCamera,
       customProperties:false,
-      creator:"Retarget to See - original Target hierarchy and names"
+      creator:"Retarget to See animation donor only"
     });
 
-    if (!(bytes instanceof Uint8Array) || bytes.byteLength < 1024){
-      throw new Error("El exportador FBX devolvió un archivo vacío o incompleto.");
+    if (!(donorBytes instanceof Uint8Array) || donorBytes.byteLength < 1024){
+      throw new Error("No pude construir el FBX donante de animación.");
     }
 
+    // Critical path: keep the user's Target FBX itself. We parse the original
+    // uploaded bytes and append only AnimationStack/Layer/CurveNode/Curve
+    // records. Models, bones, hierarchy, rest transforms, skin, mesh, unit
+    // settings and Blender-exported FBX metadata come from the original file.
+    const injected = injectAnimationIntoOriginalFbx(
+      state.targetOriginalFbxBytes,
+      donorBytes,
+      {actionName:direct.clip.name}
+    );
+
     const name = safeBaseName(rig.fileName || "target")
-      + "_retargeted_originalRig.fbx";
+      + "_retargeted_EXACT_TARGET.fbx";
 
     downloadBlob(
-      new Blob([bytes],{type:"application/octet-stream"}),
+      new Blob([injected.bytes],{type:"application/octet-stream"}),
       name
     );
 
-    const sample = validation.resolved.slice(0,8)
-      .map(x => x.runtimeName === x.originalName
-        ? x.originalName
-        : `${x.runtimeName}→${x.originalName}`
-      )
-      .join(", ");
-
+    const d = injected.diagnostics;
     setStatus(
-      "FBX RIG original exportado: " + name
-      + ". " + hierarchy.bones + " huesos de la jerarquía Target; "
-      + exactNames.restoredCount + " nombres FBX originales restaurados. "
-      + "La Action " + direct.clip.name
-      + " está vinculada por UUID durante la escritura, así que .L/.R y otros "
-      + "nombres originales se conservan en el FBX. Ejemplos: " + sample + ".",
+      "FBX exacto exportado: " + name
+      + ". El esqueleto NO fue reconstruido: se reutilizó el FBX Target original ("
+      + d.originalModelCount + " Models) y sólo se inyectaron "
+      + d.donorAnimationObjects + " objetos de animación / "
+      + d.donorConnections + " conexiones. Controles animados: "
+      + d.mappedTargets.slice(0,24).join(", ")
+      + (d.mappedTargets.length > 24 ? "…" : "")
+      + ".",
       "success"
     );
   }catch(err){
     console.error(err);
     setStatus(
-      "Falló el FBX para RIG original: " + (err.message || err),
+      "Falló el FBX exacto: " + (err.message || err),
       "error"
     );
   }finally{
@@ -3304,89 +3313,71 @@ async function exportOriginalTargetRigFbx(){
 }
 
 async function exportGlb(){
-  if (!state.targetRig || !state.retargetClip || !state.sourceClip || state.busy) return;
+  if (!state.targetRig || !state.retargetClip || state.busy) return;
 
   const rig = state.targetRig;
-  const previewClip = state.retargetClip;
-  const savedTime = state.currentTime;
-  const hidden = [];
-  let exactNames = null;
-  let carrier = null;
+  const clip = state.retargetClip;
 
   state.playing = false;
-  els.playBtn.textContent = "▶";
   setBusy(true);
-  hideProgress();
-  setStatus("Preparando GLB con el RIG original completo…");
+  setStatus("Preparando GLB de previsualización deform-only…");
 
   try{
-    validateOriginalCloudRigControls(rig);
-    const direct = await bakeOriginalRigControlClip();
-
     resetRigToRest(rig);
     rig.root.updateMatrixWorld(true);
 
-    exactNames = prepareExactOriginalNameExport(rig,direct.clip);
-    carrier = createOriginalRigCarrier(rig);
+    let exportRoot = rig.root;
+    let exportClip = clip;
+    let deformOnlyInfo = null;
 
-    // Do not export the original character meshes: they were the source of
-    // previous bind/scale explosions. The invisible carrier keeps all 342
-    // Target bones as glTF skin joints, including FK/IK/control bones.
-    rig.root.traverse(obj => {
-      if (!obj.isMesh || obj === carrier.mesh) return;
-      hidden.push([obj,obj.visible]);
-      obj.visible = false;
-    });
+    if (rig.cloudRigProfile){
+      // GLB cannot preserve Blender CloudRig semantics 1:1. Keep it as a
+      // clean preview/export of the deform result only; do NOT mix a second
+      // all-controls armature into the same glTF skin.
+      deformOnlyInfo = buildCleanDeformExport(rig,clip);
+      exportRoot = deformOnlyInfo.root;
+      exportClip = deformOnlyInfo.clip;
+    }
 
     const exporter = new GLTFExporter();
-    const data = await exporter.parseAsync(rig.root,{
-      binary:true,
-      trs:true,
-      onlyVisible:true,
-      animations:[exactNames.clip],
-      includeCustomExtensions:true
-    });
+    const result = await parseGlbWithFallback(
+      exporter,
+      exportRoot,
+      exportClip
+    );
 
     const name = safeBaseName(rig.fileName || "target")
-      + "_retargeted_originalRig.glb";
+      + (deformOnlyInfo ? "_preview_deform.glb" : "_retargeted.glb");
 
     downloadBlob(
-      new Blob([data],{type:"model/gltf-binary"}),
+      new Blob([result.data],{type:"model/gltf-binary"}),
       name
     );
 
+    applySolidWhiteViewport(rig.root);
+    activateClip(rig,clip);
+    seek(0);
+
     setStatus(
-      "GLB RIG original exportado: " + name
-      + ". Se conservaron " + rig.bones.length
-      + " huesos del Target como joints, incluidos FK/IK/controles; "
-      + exactNames.restoredCount
-      + " nombres originales restaurados. La malla del personaje no se exportó.",
+      "GLB de previsualización exportado: " + name
+      + (deformOnlyInfo
+        ? ". Contiene un único skeleton deform-only; para reutilizar la Action sobre el RIG-Sintel original usa «FBX EXACTO · Target original»."
+        : "."),
       "success"
     );
   }catch(err){
     console.error(err);
+    applySolidWhiteViewport(rig.root);
+    activateClip(rig,clip);
+    seek(0);
     setStatus(
-      "Falló el GLB para RIG original: " + (err.message || err),
+      "Falló la exportación GLB: " + (err.message || err),
       "error"
     );
   }finally{
-    for (const [obj,visible] of hidden) obj.visible = visible;
-    if (carrier) carrier.dispose();
-    if (exactNames) exactNames.restore();
-
-    resetRigToRest(rig);
-    activateClip(rig,previewClip);
-    setRigTime(
-      rig,
-      Math.max(0,Math.min(savedTime,previewClip.duration || 0))
-    );
-    applySolidWhiteViewport(rig.root);
-    rig.root.updateMatrixWorld(true);
     setBusy(false);
-    hideProgress();
   }
 }
-
 
 function exportClipJson(){
   if (!state.retargetClip) return;
